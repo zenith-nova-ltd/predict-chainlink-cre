@@ -1,0 +1,5 @@
+.env
+node_modules
+bun.lock
+config.staging.json
+config.production.json

@@ -1,0 +1,77 @@
+{
+    "model": "arcee-ai/trinity-large-preview:free",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a disciplined CRYPTO PREDICTION MARKET TRADER focused specifically on Polymarket BTC \"Up or Down\" binary markets.\n  \n  You will receive:\n  - Current Polymarket market data for a SINGLE BTC up/down market\n  - Market slug: \"btc-updown-15m-1772078400\"\n  - Outcomes: [\"Up\", \"Down\"]\n  - Current outcome prices (implied probabilities): \"Up\": 0.485 (48.5%), \"Down\": 0.515 (51.5%)\n  - Optional external BTC price / volatility context\n  \n  Your job:\n  - Decide whether to bet on \"Up\", bet on \"Down\", or make NO_BET\n  - Size the bet in USD conservatively based on edge and risk\n  - Explain your reasoning clearly before giving the final decision\n  \n  Risk & behavior policy:\n  1) NEVER bet huge size relative to account; think in terms of small, repeatable edges.\n  2) Prefer NO_BET when you do not have a clear, robust advantage or when prices look fair.\n  3) When you do bet, only size up when:\n     - The implied probability is clearly mispriced relative to your best estimate.\n     - The time window and volatility regime are well-understood (e.g., around news or daily closes).\n  4) Avoid martingale or emotional \"revenge\" style reasoning. Every decision must stand on its own merits.\n  5) Respect Kelly-style intuition: edge and variance should both influence bet size.\n  \n  Reasoning recipe (for BTC up/down short windows):\n  - Consider current BTC trend and momentum on short (5m/15m) and higher (1h/4h) timeframes.\n  - Think about recent volatility spikes, key levels, and whether the window overlaps major news or daily closes.\n  - Compare Polymarket implied probabilities (prices) vs. your best directional view.\n  - Be explicit about why the market might be mispriced, or why it is likely fair.\n  \n  Output contract (STRICT):\n  - Return a JSON object with exactly:\n    {\n      \"reasoning\": string,   // long, step-by-step analysis\n      \"decision\": {\n        \"market_slug\": string,           // should be \"btc-updown-15m-1772078400\"\n        \"direction\": \"UP\" | \"DOWN\" | \"NO_BET\",\n        \"size_usd\": number,             // bet size in USD (0 allowed when NO_BET)\n        \"max_loss_usd\": number,         // worst-case loss if the bet resolves against you\n        \"edge_prob\": number             // your estimated probability (0–1) that your chosen side is correct\n      }\n    }\n  - Do NOT emit Markdown, text outside JSON, or extra fields."
+      },
+      {
+        "role": "user",
+        "content": "{\"market_data\":[{\"asset\":\"BTC\",\"current_price\":68251.77,\"timestamp\":\"2026-02-26T04:03:59.116Z\",\"intraday\":{\"values\":{\"ema_20\":68188.38,\"macd\":8.05,\"rsi_7\":56.55,\"rsi_14\":52.86},\"series\":{\"ema_20\":[68159.12,68151.93,68147.23,68158.39,68155.93,68163.88,68175.27,68178,68181.7,68188.38],\"macd\":[-30.19,-32.95,-33.23,-20.16,-20.21,-11.5,-1.01,0.86,3.35,8.05],\"rsi_7\":[51.11,44.54,46.58,60.93,48.53,56.83,59.95,52.05,53.22,56.55],\"rsi_14\":[49.06,46.1,46.98,53.89,48.36,52.6,54.27,50.79,51.34,52.86]}},\"long_term\":{\"values\":{\"ema_20\":66463.83,\"ema_50\":66820.88,\"atr_3\":1104.58,\"atr_14\":1211.63,\"macd\":333.06,\"rsi_14\":60.29},\"series\":{\"ema_20\":[65493.89,65357.15,65360.45,65328.81,65338.45,65535.97,65869.52,66071.28,66275.62,66463.83],\"macd\":[-1049.43,-1031.15,-898.7,-813.67,-705.74,-455,-123.66,53.57,210.06,333.06],\"rsi_14\":[39.83,37.85,47.73,45.6,48.35,59.26,65.67,59.19,60.11,60.29]}}}],\"instructions\":{\"assets\":[\"BTC\"],\"requirement\":\"Decide actions for all assets and return a strict JSON array matching the schema.\"}}"
+      }
+    ],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "polymarket_updown_decision",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "Long-form step-by-step analysis including TAAPI indicator interpretation and Polymarket pricing comparison"
+            },
+            "decision": {
+              "type": "object",
+              "description": "Final bet decision for this Polymarket up/down market",
+              "properties": {
+                "market_slug": {
+                  "type": "string",
+                  "description": "Polymarket market slug this decision applies to"
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "UP",
+                    "DOWN",
+                    "NO_BET"
+                  ],
+                  "description": "UP, DOWN, or NO_BET"
+                },
+                "size_usd": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Bet size in USD (0 allowed when NO_BET)"
+                },
+                "max_loss_usd": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Worst-case dollar loss if the bet loses (usually <= size_usd)"
+                },
+                "edge_prob": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "Model's estimated probability (0–1) that the chosen side is correct"
+                }
+              },
+              "required": [
+                "market_slug",
+                "direction",
+                "size_usd",
+                "max_loss_usd",
+                "edge_prob"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "reasoning",
+            "decision"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  }

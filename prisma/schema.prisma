@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Direction {
+  UP
+  DOWN
+  NO_BET
+}
+
+enum BetStatus {
+  PENDING
+  WON
+  LOST
+  CANCELLED
+}
+
+model Prediction {
+  id            String       @id @default(uuid())
+  userId        String      @map("user_id")
+  symbol        String
+  timestamp     DateTime     @default(now())
+  currentPrice  Float?       @map("current_price")
+  marketSlug    String       @map("market_slug")
+  question      String
+  outcomes      Json
+  outcomePrices Json         @map("outcome_prices")
+  direction     Direction
+  sizeUsd       Float        @map("size_usd")
+  maxLossUsd    Float        @map("max_loss_usd")
+  edgeProb      Float        @map("edge_prob")
+  reasoning     String
+  clobTokenIds  Json?        @map("clob_token_ids")
+  virtualBets   VirtualBet[]
+  user          User         @relation(fields: [userId], references: [id])
+
+  @@map("predictions")
+}
+
+model User {
+  id            String       @id @default(uuid())
+  walletAddress String       @unique @map("wallet_address")
+  nonce         String
+  balance       Float        @default(10000.0)
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+  virtualBets   VirtualBet[]
+  predictions   Prediction[]
+
+  @@map("users")
+}
+
+model VirtualBet {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  predictionId    String    @map("prediction_id")
+  marketSlug      String    @map("market_slug")
+  direction       Direction
+  amount          Float
+  outcomePrice    Float     @map("outcome_price")
+  potentialPayout Float     @map("potential_payout")
+  status          BetStatus @default(PENDING)
+  pnl             Float?
+  settledAt       DateTime? @map("settled_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  user       User       @relation(fields: [userId], references: [id])
+  prediction Prediction @relation(fields: [predictionId], references: [id])
+
+  @@map("virtual_bets")
+}
