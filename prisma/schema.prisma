@@ -66,6 +66,11 @@ model VirtualBet {
   status          BetStatus @default(PENDING)
   pnl             Float?
   settledAt       DateTime? @map("settled_at")
+  exitOutcomePrice  Float?   @map("exit_outcome_price")
+  takeProfitAmount  Float?   @map("take_profit_amount")
+  closedAt         DateTime? @map("closed_at")
+  closeReason      String?  @map("close_reason")
+  takeProfitPct    Float    @default(0.2) @map("take_profit_pct")
   createdAt       DateTime  @default(now()) @map("created_at")
 
   user       User       @relation(fields: [userId], references: [id])

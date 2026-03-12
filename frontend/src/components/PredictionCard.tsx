@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { placeVirtualBet } from '../api/prediction';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { getVirtualBets, placeVirtualBet, sellVirtualBet } from '../api/prediction';
 import { useAuth } from '../context/AuthContext';
 import type { PredictionResponse } from '../types';
 
 const SESSION_DURATION_SEC = 900; // 15 min
+const POLYMARKET_CLOB_MARKET_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 
 const DIRECTION_STYLES = {
   UP: { bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', text: 'text-emerald-400', label: 'UP' },
@@ -18,6 +19,7 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
   const { user, profile, refreshProfile } = useAuth();
   const queryClient = useQueryClient();
   const [showReasoning, setShowReasoning] = useState(false);
+  const [wsEnabled, setWsEnabled] = useState(true);
   const dir = DIRECTION_STYLES[data.prediction.direction];
 
   const [betSide, setBetSide] = useState<'UP' | 'DOWN'>(
@@ -27,6 +29,39 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
   const [betSuccess, setBetSuccess] = useState<string | null>(null);
   const [betError, setBetError] = useState<string | null>(null);
   const [sessionCountdown, setSessionCountdown] = useState<number | null>(null);
+
+  const marketKey = data.market.market_slug;
+  const clobTokenIds = useMemo(() => {
+    const raw = (data.market as any).clobTokenIds;
+    if (Array.isArray(raw)) return raw as string[];
+
+    if (typeof raw === 'string') {
+      const s = raw.trim();
+      if (!s) return [] as string[];
+
+      // Sometimes backend sends JSON-encoded array string like '["id1","id2"]'
+      if (s.startsWith('[') && s.endsWith(']')) {
+        try {
+          const parsed = JSON.parse(s);
+          if (Array.isArray(parsed)) return parsed.map(String);
+        } catch {
+          // fall through
+        }
+      }
+
+      return [s];
+    }
+
+    return [] as string[];
+  }, [data.market]);
+  const tokenIdsKey = useMemo(() => clobTokenIds.join('|'), [clobTokenIds]);
+
+  const [liveOutcomePrices, setLiveOutcomePrices] = useState<number[]>(() => data.market.outcomePrices ?? []);
+
+  // Reset displayed prices when switching markets
+  useEffect(() => {
+    setLiveOutcomePrices(data.market.outcomePrices ?? []);
+  }, [marketKey]);
 
   // Session end: from market_slug trailing timestamp (e.g. btc-updown-15m-1770690600) + 15 min, else timestamp + 15 min
   const sessionEndMs = (() => {
@@ -52,13 +87,234 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
   const upIndex = data.market.outcomes.findIndex((o) => o.toLowerCase() === 'up');
   const downIndex = data.market.outcomes.findIndex((o) => o.toLowerCase() === 'down');
   const selectedIndex = betSide === 'UP' ? upIndex : downIndex;
-  const selectedPrice = data.market.outcomePrices[selectedIndex] ?? 0.5;
+  const selectedPrice = liveOutcomePrices[selectedIndex] ?? data.market.outcomePrices[selectedIndex] ?? 0.5;
 
   const usdAmount = parseFloat(betAmount) || 0;
   const potentialPayout = selectedPrice > 0 ? usdAmount / selectedPrice : 0;
   const potentialProfit = potentialPayout - usdAmount;
   const balance = profile?.balance ?? user?.balance ?? 0;
   const predictionId = (data as { id?: string }).id;
+
+  // Real-time outcome prices via Polymarket CLOB WebSocket (browser-safe)
+  useEffect(() => {
+    if (!wsEnabled) return;
+    if (!clobTokenIds.length) return;
+
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let pingTimer: number | undefined;
+    let reconnectTimer: number | undefined;
+    let reconnectAttempt = 0;
+
+    const safeClearTimers = () => {
+      if (pingTimer != null) window.clearInterval(pingTimer);
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
+      pingTimer = undefined;
+      reconnectTimer = undefined;
+    };
+
+    const updatePriceForAsset = (assetId: string, price: number) => {
+      const idx = clobTokenIds.indexOf(assetId);
+      console.log('[WS] updatePriceForAsset', {
+        assetId,
+        idx,
+        price,
+        clobTokenIds,
+      });
+      if (idx < 0) return;
+      if (!Number.isFinite(price) || price <= 0 || price > 1.0001) return;
+
+      setLiveOutcomePrices((prev) => {
+        const base = prev.length ? prev : (data.market.outcomePrices ?? []);
+        const next = base.slice();
+        const prevPrice = next[idx];
+        if (prevPrice != null && Math.abs(prevPrice - price) < 1e-6) return prev;
+        next[idx] = price;
+        return next;
+      });
+    };
+
+    const readWsPayloadAsText = async (payload: unknown): Promise<string | null> => {
+      if (typeof payload === 'string') return payload;
+      if (payload instanceof Blob) return await payload.text();
+      if (payload instanceof ArrayBuffer) return new TextDecoder().decode(payload);
+      if (ArrayBuffer.isView(payload)) return new TextDecoder().decode(payload.buffer);
+      return null;
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+
+      console.log('[WS] Opening connection', {
+        url: POLYMARKET_CLOB_MARKET_WS,
+        assets_ids: clobTokenIds,
+        market_slug: data.market.market_slug,
+      });
+
+      ws = new WebSocket(POLYMARKET_CLOB_MARKET_WS);
+
+      ws.onopen = () => {
+        if (cancelled || !ws) return;
+        reconnectAttempt = 0;
+        const subscribePayload = {
+          assets_ids: clobTokenIds,
+          type: 'market',
+          custom_feature_enabled: false,
+          initial_dump: true,
+          level: 2,
+        } as const;
+
+        console.log('[WS] OPEN, sending subscribe', subscribePayload);
+
+        ws.send(JSON.stringify(subscribePayload));
+
+        safeClearTimers();
+        pingTimer = window.setInterval(() => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send('PING');
+        }, 10_000);
+      };
+
+      ws.onmessage = (evt) => {
+        void (async () => {
+          if (cancelled) return;
+
+          const text = await readWsPayloadAsText(evt.data);
+          if (!text) {
+            console.log('[WS] MESSAGE non-text payload', evt.data);
+            return;
+          }
+          if (text === 'PONG' || text === 'PING') {
+            console.log('[WS] CONTROL', text);
+            return;
+          }
+          let msg: any;
+          try {
+            msg = JSON.parse(text);
+          } catch {
+            console.warn('[WS] Failed to parse JSON', text);
+            return;
+          }
+
+          // Some responses are arrays of events; normalize to array for easier handling
+          const events: any[] = Array.isArray(msg) ? msg : [msg];
+
+          for (const ev of events) {
+            const eventType: string | undefined = ev?.event_type ?? ev?.type;
+            // Log mọi message nhận được (trừ PING/PONG) để debug — server chỉ gửi price_change khi có giao dịch/orderbook thay đổi
+            if (eventType || ev?.price_changes) {
+              console.log('[WS] RECV', eventType ?? '(no event_type)', Array.isArray(ev?.price_changes) ? `price_changes:${ev.price_changes.length}` : ev);
+            }
+
+            // Market resolved event: stop WS updates for this market
+            if (eventType === 'market_resolved') {
+              const market = (ev as any)?.market as string | undefined;
+              if (!market || !data.market.market_slug || market === data.market.market_slug) {
+                console.log('[WS] market_resolved received, closing socket');
+                setWsEnabled(false);
+              }
+              continue;
+            }
+
+            // Price change event (array of price_changes)
+            if (eventType === 'price_change' && Array.isArray(ev?.price_changes)) {
+            // Chỉ lấy 1 price_change (ưu tiên size lớn nhất) rồi suy ra outcome còn lại = 1 - price
+            const relevant = (ev.price_changes as any[])
+              .map((c) => ({
+                change: c,
+                assetId: (c?.asset_id ?? c?.assetId ?? c?.asset) as string | undefined,
+                side: (c?.side as string | undefined) ?? undefined,
+                size: typeof c?.size === 'string' || typeof c?.size === 'number' ? Number(c.size) : NaN,
+                price: typeof c?.price === 'string' || typeof c?.price === 'number' ? Number(c.price) : NaN,
+              }))
+              .filter(
+                (x) =>
+                  !!x.assetId &&
+                  x.side === 'BUY' &&
+                  clobTokenIds.includes(x.assetId) &&
+                  Number.isFinite(x.price) &&
+                  x.price >= 0 &&
+                  x.price <= 1.0001,
+              )
+              .sort((a, b) => {
+                const as = Number.isFinite(a.size) ? a.size : -1;
+                const bs = Number.isFinite(b.size) ? b.size : -1;
+                return bs - as;
+              });
+
+            const picked = relevant[0];
+            if (!picked) continue;
+
+            const assetId = picked.assetId!;
+
+            // Polymarket UI: midpoint of bid-ask; if spread > 0.10 use last traded price.
+            // We approximate using best_bid/best_ask carried on the same price_change message.
+            const bestBidRaw = (picked.change?.best_bid ?? picked.change?.bestBid) as string | number | undefined;
+            const bestAskRaw = (picked.change?.best_ask ?? picked.change?.bestAsk) as string | number | undefined;
+            const bestBid = typeof bestBidRaw === 'string' || typeof bestBidRaw === 'number' ? Number(bestBidRaw) : NaN;
+            const bestAsk = typeof bestAskRaw === 'string' || typeof bestAskRaw === 'number' ? Number(bestAskRaw) : NaN;
+
+            const lastTrade = picked.price;
+            let displayPrice = lastTrade;
+
+            if (Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid >= 0 && bestAsk >= 0) {
+              const spread = bestAsk - bestBid;
+              if (Number.isFinite(spread) && spread >= 0 && spread <= 0.10) {
+                displayPrice = (bestBid + bestAsk) / 2;
+              } else {
+                displayPrice = lastTrade;
+              }
+            }
+
+            const clamped = Math.max(0, Math.min(1, displayPrice));
+
+            console.log('[WS] PARSED MESSAGE price_change (picked)', {
+              assetId,
+              price: clamped,
+              size: picked.size,
+            });
+
+            updatePriceForAsset(assetId, clamped);
+
+            if (clobTokenIds.length === 2) {
+              const idx = clobTokenIds.indexOf(assetId);
+              if (idx >= 0) {
+                const otherAssetId = clobTokenIds[1 - idx];
+                updatePriceForAsset(otherAssetId, 1 - clamped);
+              }
+            }
+            continue;
+            }
+          }
+        })();
+      };
+
+      ws.onclose = () => {
+        safeClearTimers();
+        if (cancelled) return;
+        const delay = Math.min(30_000, 1000 * Math.pow(2, reconnectAttempt));
+        reconnectAttempt += 1;
+        reconnectTimer = window.setTimeout(connect, delay);
+      };
+
+      ws.onerror = () => {
+        // Let onclose handle reconnect/backoff
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      safeClearTimers();
+      try {
+        ws?.close();
+      } catch {
+        // ignore
+      }
+      ws = null;
+    };
+  }, [marketKey, tokenIdsKey, wsEnabled]);
 
   const betMutation = useMutation({
     mutationFn: placeVirtualBet,
@@ -88,6 +344,60 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
       amount: usdAmount,
     });
   };
+
+  const { data: virtualBets } = useQuery({
+    queryKey: ['virtual-bets'],
+    queryFn: () => getVirtualBets(),
+    enabled: !!user,
+    refetchInterval: 15_000,
+  });
+
+  const autoSellTriggeredRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!user || !predictionId || !virtualBets || !clobTokenIds.length) return;
+    const upLive = upIndex >= 0 ? (liveOutcomePrices[upIndex] ?? data.market.outcomePrices[upIndex] ?? NaN) : NaN;
+    const downLive = downIndex >= 0 ? (liveOutcomePrices[downIndex] ?? data.market.outcomePrices[downIndex] ?? NaN) : NaN;
+
+    const relevantBets = virtualBets.filter((b) => b.status === 'PENDING' && b.marketSlug === marketKey);
+
+    for (const bet of relevantBets) {
+      if (autoSellTriggeredRef.current.has(bet.id)) continue;
+
+      const livePrice = bet.direction === 'UP' ? upLive : downLive;
+      if (!Number.isFinite(livePrice) || livePrice <= 0 || livePrice > 1.0001) continue;
+
+      const entryPrice = bet.outcomePrice;
+      if (!entryPrice || entryPrice <= 0) continue;
+
+      const targetPrice = entryPrice * 1.2;
+      if (livePrice >= targetPrice) {
+        autoSellTriggeredRef.current.add(bet.id);
+        sellVirtualBet(bet.id, livePrice)
+          .then(() => {
+            refreshProfile();
+            queryClient.invalidateQueries({ queryKey: ['virtual-bets'] });
+            queryClient.invalidateQueries({ queryKey: ['bet-summary'] });
+          })
+          .catch((err: Error) => {
+            autoSellTriggeredRef.current.delete(bet.id);
+            console.error('[auto-sell] failed', err.message);
+          });
+      }
+    }
+  }, [
+    user,
+    predictionId,
+    virtualBets,
+    clobTokenIds.length,
+    liveOutcomePrices,
+    upIndex,
+    downIndex,
+    marketKey,
+    refreshProfile,
+    queryClient,
+    data.market.outcomePrices,
+  ]);
 
   const canBet = !!user && !!predictionId && usdAmount > 0 && usdAmount <= balance;
 
@@ -132,7 +442,7 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
           <div key={outcome} className="flex-1 rounded-lg bg-gray-800/60 px-4 py-3 text-center">
             <p className="text-xs text-gray-400 mb-1">{outcome}</p>
             <p className="text-sm font-semibold font-mono">
-              {((data.market.outcomePrices[i] ?? 0) * 100).toFixed(1)}%
+              {((liveOutcomePrices[i] ?? data.market.outcomePrices[i] ?? 0) * 100).toFixed(1)}%
             </p>
           </div>
         ))}
@@ -167,7 +477,7 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
                     : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                 }`}
               >
-                UP {((data.market.outcomePrices[upIndex] ?? 0) * 100).toFixed(1)}%
+                UP {((liveOutcomePrices[upIndex] ?? data.market.outcomePrices[upIndex] ?? 0) * 100).toFixed(1)}%
               </button>
               <button
                 type="button"
@@ -178,7 +488,7 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
                     : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                 }`}
               >
-                DOWN {((data.market.outcomePrices[downIndex] ?? 0) * 100).toFixed(1)}%
+                DOWN {((liveOutcomePrices[downIndex] ?? data.market.outcomePrices[downIndex] ?? 0) * 100).toFixed(1)}%
               </button>
             </div>
 

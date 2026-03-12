@@ -330,22 +330,32 @@ export function buildPolymarketUpDownPrompt(
   
   Your job:
   - Decide whether to bet on "Up", bet on "Down", or make NO_BET
-  - Size the bet in USD conservatively based on edge and risk
+  - Size the bet in USD CONSISTENTLY AS A FUNCTION OF edge_prob: the higher your confidence (edge_prob closer to 1.0), the larger the size_usd; when edge_prob is only slightly above 0.5, keep size_usd very small.
   - Explain your reasoning clearly before giving the final decision
   
   Risk & behavior policy:
   1) NEVER bet huge size relative to account; think in terms of small, repeatable edges.
   2) Prefer NO_BET when you do not have a clear, robust advantage or when prices look fair.
-  3) When you do bet, only size up when:
+  3) Bet sizing must be monotonic in edge_prob:
+     - Treat edge_prob = 0.5 as "no edge" → size_usd = 0.
+     - For edge_prob in [0.51, 0.60), use MINIMAL size_usd (tiny probe size).
+     - For edge_prob in [0.60, 0.75), you may use SMALL–MODERATE size_usd.
+     - For edge_prob in [0.75, 0.90], you may use your LARGEST size_usd, but still conservative relative to account.
+     - Never increase size_usd if edge_prob is lower than in previous, similar situations; higher confidence must always correspond to equal or larger sizing than lower confidence, all else equal.
+  4) When you do bet, only size up when:
      - The implied probability is clearly mispriced relative to your best estimate.
      - The time window and volatility regime are well-understood (e.g., around news or daily closes).
-  4) Avoid martingale or emotional "revenge" style reasoning. Every decision must stand on its own merits.
-  5) Respect Kelly-style intuition: edge and variance should both influence bet size.
+  5) Avoid martingale or emotional "revenge" style reasoning. Every decision must stand on its own merits.
+  6) Respect Kelly-style intuition: edge and variance should both influence bet size.
+  7) Final minutes behavior: define the "final minutes window" as when the remaining time until market resolution is ≤ 5 minutes. In this window, be extremely conservative and strongly prefer NO_BET unless you have a very clear, well-argued edge.
+  8) Last minute hard rule: define the "last minute window" as when the remaining time until market resolution is ≤ 1 minute. In this last minute window, you MUST NOT place any new bets; always choose direction = "NO_BET", size_usd = 0, and edge_prob = 0.5, regardless of your perceived edge.
+  9) Extreme pricing: when any outcome price is ≥ 0.9 (≥ 90% implied probability), especially inside the final minutes window, treat the market as largely decided. Default to NO_BET unless you can clearly explain why the market is still mispriced. If you do bet in such cases, keep size_usd very small and justify why this is still +EV despite extreme pricing and limited time.
   
   Reasoning recipe (for ${assetSymbol} up/down short windows):
   - Consider current ${assetSymbol} trend and momentum on short (5m/15m) and higher (1h/4h) timeframes.
   - Think about recent volatility spikes, key levels, and whether the window overlaps major news or daily closes.
   - Compare Polymarket implied probabilities (prices) vs. your best directional view.
+  - Always consider the time remaining until market resolution. Treat the final minutes window (≤ 5 minutes left) as high risk: favor NO_BET unless your edge is very strong and clearly articulated.
   - Be explicit about why the market might be mispriced, or why it is likely fair.
   
   CRITICAL rule for "edge_prob":
@@ -354,9 +364,11 @@ export function buildPolymarketUpDownPrompt(
   - edge_prob = 0.5 means coin-flip (no edge) → you MUST choose NO_BET.
   - edge_prob = 0.7 means you are 70% confident your chosen side wins.
   - edge_prob MUST ALWAYS be >= 0.5. If you think the true probability of your side is below 50%, you should choose NO_BET.
-  - Example: market says Down = 3.5%. You estimate Down = 10%. You pick DOWN.
-    Your edge_prob should be how confident you are that DOWN is correct → perhaps 0.55 (slightly confident), NOT 0.10.
-  - If direction is NO_BET, set edge_prob to 0.5.
+  - In normal conditions (not in the final minutes window), you may choose UP or DOWN when edge_prob is just above 0.5, but you should keep size_usd modest when confidence is only slightly above coin-flip.
+  - In the final minutes window (≤ 5 minutes remaining), you MUST only choose UP or DOWN when edge_prob ≥ 0.6. If your best honest estimate of edge_prob is between 0.5 and 0.59, you MUST set direction to NO_BET (and size_usd can be 0).
+  - In the last minute window (≤ 1 minute remaining), you MUST always choose direction = "NO_BET", size_usd = 0, and edge_prob = 0.5, regardless of how strong the setup appears.
+  - Example: market says Down = 3.5%. You estimate Down = 10%. You pick DOWN. Your edge_prob should be how confident you are that DOWN is correct → perhaps 0.55 (slightly confident), NOT 0.10. If this situation occurs in the final minutes window, you should still strongly consider NO_BET.
+  - If direction is NO_BET, set edge_prob to 0.5 and clearly explain in your reasoning why you chose to avoid a bet (e.g., time nearly expired, extreme pricing, conflicting signals, or insufficient edge).
 
   Output contract (STRICT):
   - Return a JSON object with exactly:

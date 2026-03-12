@@ -62,6 +62,19 @@ interface ContextPayload {
     assets: string[];
     requirement: string;
   };
+  /** ISO timestamp for "now" when the decision is requested */
+  current_time_iso: string;
+  /**
+   * Market window timing based on Polymarket eventStartTime.
+   * Helps the LLM reason about "final minutes" and time to resolution.
+   */
+  market_window: {
+    market_slug: string;
+    /** ISO start time of the 15m window */
+    window_start_iso: string;
+    /** ISO close/resolve time of the 15m window (start + 15 minutes) */
+    window_close_iso: string;
+  };
 }
 /** Up/Down decision types */
 export type UpDownDirection = 'UP' | 'DOWN' | 'NO_BET';
@@ -332,16 +345,25 @@ export class PolymarketUpDownAgent {
   buildUserContext(params: {
     marketData: MarketSection[];
     assets: string[];
+    currentTimeIso: string;
+    marketSlug: string;
+    windowStartIso: string;
+    windowCloseIso: string;
   }): string {
-  
     const payload: ContextPayload = {
       market_data: params.marketData,
       instructions: {
         assets: params.assets,
         requirement: 'Decide actions for all assets and return a strict JSON array matching the schema.',
       },
+      current_time_iso: params.currentTimeIso,
+      market_window: {
+        market_slug: params.marketSlug,
+        window_start_iso: params.windowStartIso,
+        window_close_iso: params.windowCloseIso,
+      },
     };
-    
+
     return JSON.stringify(payload);
   }
   /**
@@ -442,18 +464,15 @@ private async fetchIndicatorsByDefs(
   }> {
     const asset = symbol.toUpperCase();
 
-    const marketData = await this.getCurrentMarketData({ asset });
-
-    const context = this.buildUserContext({
-      marketData,
-      assets: [asset],
-    });
-
     const FIFTEEN_MINUTES = 15 * 60;
-    const now = Math.floor(Date.now() / 1000);
-    const roundedTimestamp = Math.floor(now / FIFTEEN_MINUTES) * FIFTEEN_MINUTES;
+    const nowMs = Date.now();
+    const currentTimeIso = new Date(nowMs).toISOString();
 
+    // Build slug for the current 15m window as before
+    const nowSec = Math.floor(nowMs / 1000);
+    const roundedTimestamp = Math.floor(nowSec / FIFTEEN_MINUTES) * FIFTEEN_MINUTES;
     const slug = `${asset.toLowerCase()}-updown-15m-${roundedTimestamp}`;
+
     const markets = await fetchBtcUpDownMarkets({ slug });
 
     if (!markets || markets.length === 0 || !markets[0]) {
@@ -461,6 +480,18 @@ private async fetchIndicatorsByDefs(
     }
 
     const m = markets[0];
+    if (!m.eventStartTime) {
+      throw new Error('Polymarket event is missing eventStartTime; cannot derive 15m close time.');
+    }
+
+    const eventStartMs = Date.parse(m.eventStartTime);
+    if (Number.isNaN(eventStartMs)) {
+      throw new Error(`Invalid eventStartTime from Polymarket: ${m.eventStartTime}`);
+    }
+
+    const windowStartIso = new Date(eventStartMs).toISOString();
+    const windowCloseIso = new Date(eventStartMs + FIFTEEN_MINUTES * 1000).toISOString();
+
     const snapshot: UpDownMarketSnapshot = {
       market_slug: m.slug,
       question: m.question,
@@ -468,6 +499,17 @@ private async fetchIndicatorsByDefs(
       outcomePrices: m.outcomes.map((o: { price: number }) => o.price),
       clobTokenIds: m.clobTokenIds ?? [],
     };
+
+    const marketData = await this.getCurrentMarketData({ asset });
+
+    const context = this.buildUserContext({
+      marketData,
+      assets: [asset],
+      currentTimeIso,
+      marketSlug: snapshot.market_slug,
+      windowStartIso,
+      windowCloseIso,
+    });
 
     const result = await this.decideUpDown(asset, snapshot, context);
 

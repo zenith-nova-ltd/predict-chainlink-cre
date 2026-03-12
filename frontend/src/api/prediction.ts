@@ -133,3 +133,16 @@ export async function getBetSummary(): Promise<BetSummary> {
   }
   return res.json() as Promise<BetSummary>;
 }
+
+export async function sellVirtualBet(id: string, exitOutcomePrice: number): Promise<VirtualBetResponse> {
+  const res = await authFetch(`${BASE}/api/virtual-bet/${encodeURIComponent(id)}/sell`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ exitOutcomePrice }),
+  });
+  const data = (await res.json()) as VirtualBetResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || `Sell virtual bet failed (${res.status})`);
+  }
+  return data;
+}

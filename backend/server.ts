@@ -116,6 +116,18 @@ app.post('/api/auth/verify', async (req, res) => {
   }
 });
 
+function getDisplayStatusForBet(bet: { status: string; pnl: number | null }): 'WIN' | 'LOST' | 'PENDING' {
+  // Pending bets are always PENDING
+  if (bet.status === 'PENDING') return 'PENDING';
+
+  // Cancelled bets are excluded from WIN/LOST and treated as neither
+  if (bet.status === 'CANCELLED') return 'PENDING';
+
+  const pnl = bet.pnl ?? 0;
+  if (pnl > 0) return 'WIN';
+  return 'LOST';
+}
+
 app.get('/api/user/profile', authMiddleware, async (req, res) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user!.userId } });
@@ -126,8 +138,12 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
 
     const bets = await prisma.virtualBet.findMany({ where: { userId: user.id } });
     const totalBets = bets.length;
-    const settledBets = bets.filter((b) => b.status === 'WON' || b.status === 'LOST');
-    const wonBets = bets.filter((b) => b.status === 'WON').length;
+
+    const settledBets = bets.filter(
+      (b) => b.status !== 'PENDING' && b.status !== 'CANCELLED',
+    );
+    const wonBets = settledBets.filter((b) => getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null }) === 'WIN')
+      .length;
     const totalPnl = settledBets.reduce((sum, b) => sum + (b.pnl ?? 0), 0);
     const winRate = settledBets.length > 0 ? wonBets / settledBets.length : 0;
 
@@ -265,7 +281,9 @@ app.post('/api/virtual-bet', authMiddleware, async (req, res) => {
 
 app.get('/api/virtual-bets', authMiddleware, async (req, res) => {
   try {
-    const status = req.query.status as string | undefined;
+    const status = (Array.isArray(req.query.status) ? req.query.status[0] : req.query.status) as
+      | string
+      | undefined;
     const where: Record<string, unknown> = { userId: req.user!.userId };
     if (status && ['PENDING', 'WON', 'LOST', 'CANCELLED'].includes(status)) {
       where.status = status;
@@ -289,19 +307,28 @@ app.get('/api/virtual-bets', authMiddleware, async (req, res) => {
     });
 
     res.json(
-      bets.map((b) => ({
-        id: b.id,
-        marketSlug: b.marketSlug,
-        direction: b.direction,
-        amount: b.amount,
-        outcomePrice: b.outcomePrice,
-        potentialPayout: Math.round(b.potentialPayout * 100) / 100,
-        status: b.status,
-        pnl: b.pnl != null ? Math.round(b.pnl * 100) / 100 : null,
-        settledAt: b.settledAt?.toISOString() ?? null,
-        createdAt: b.createdAt.toISOString(),
-        prediction: b.prediction,
-      })),
+      bets.map((b) => {
+        const roundedPnl = b.pnl != null ? Math.round(b.pnl * 100) / 100 : null;
+        const displayStatus = getDisplayStatusForBet({
+          status: b.status,
+          pnl: roundedPnl,
+        });
+
+        return {
+          id: b.id,
+          marketSlug: b.marketSlug,
+          direction: b.direction,
+          amount: b.amount,
+          outcomePrice: b.outcomePrice,
+          potentialPayout: Math.round(b.potentialPayout * 100) / 100,
+          status: b.status,
+          displayStatus,
+          pnl: roundedPnl,
+          settledAt: b.settledAt?.toISOString() ?? null,
+          createdAt: b.createdAt.toISOString(),
+          prediction: b.prediction,
+        };
+      }),
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -320,25 +347,133 @@ app.get('/api/virtual-bets/summary', authMiddleware, async (req, res) => {
 
     const bets = await prisma.virtualBet.findMany({ where: { userId: user.id } });
     const totalBets = bets.length;
-    const pendingBets = bets.filter((b) => b.status === 'PENDING').length;
-    const settledBets = bets.filter((b) => b.status === 'WON' || b.status === 'LOST');
-    const wonBets = settledBets.filter((b) => b.status === 'WON').length;
-    const totalPnl = settledBets.reduce((sum, b) => sum + (b.pnl ?? 0), 0);
-    const winRate = settledBets.length > 0 ? wonBets / settledBets.length : 0;
+
+    const pendingBets = bets.filter((b) => getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null }) === 'PENDING')
+      .length;
+
+    const settledDisplayBets = bets.filter(
+      (b) => getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null }) !== 'PENDING',
+    );
+
+    const wonBets = settledDisplayBets.filter(
+      (b) => getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null }) === 'WIN',
+    ).length;
+
+    const lostBets = settledDisplayBets.length - wonBets;
+
+    const totalPnl = settledDisplayBets.reduce((sum, b) => sum + (b.pnl ?? 0), 0);
+    const winRate = settledDisplayBets.length > 0 ? wonBets / settledDisplayBets.length : 0;
 
     res.json({
       balance: user.balance,
       totalBets,
       pendingBets,
-      settledBets: settledBets.length,
+      settledBets: settledDisplayBets.length,
       wonBets,
-      lostBets: settledBets.length - wonBets,
+      lostBets,
       totalPnl: Math.round(totalPnl * 100) / 100,
       winRate: Math.round(winRate * 1000) / 10,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[virtual-bets/summary] failed:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post('/api/virtual-bet/:id/sell', authMiddleware, async (req, res) => {
+  try {
+    const betId = String((req.params as Record<string, unknown>)?.id ?? '').trim();
+    if (!betId) {
+      res.status(400).json({ error: 'Missing bet id' });
+      return;
+    }
+    const { exitOutcomePrice } = req.body as { exitOutcomePrice?: number };
+
+    if (!exitOutcomePrice || !Number.isFinite(exitOutcomePrice) || exitOutcomePrice <= 0 || exitOutcomePrice > 1.0001) {
+      res.status(400).json({ error: 'Invalid exitOutcomePrice. Must be in (0, 1].' });
+      return;
+    }
+
+    const bet = await prisma.virtualBet.findUnique({
+      where: { id: betId },
+    });
+
+    if (!bet || bet.userId !== req.user!.userId) {
+      res.status(404).json({ error: 'Virtual bet not found' });
+      return;
+    }
+
+    if (bet.status !== 'PENDING') {
+      res.status(400).json({ error: `Bet is not PENDING (current status: ${bet.status})` });
+      return;
+    }
+
+    if (!bet.outcomePrice || bet.outcomePrice <= 0) {
+      res.status(400).json({ error: 'Invalid stored outcomePrice for bet' });
+      return;
+    }
+
+    const entryPrice = bet.outcomePrice;
+    const shares = bet.amount / entryPrice;
+    const takeProfitAmount = shares * exitOutcomePrice;
+    const pnl = takeProfitAmount - bet.amount;
+
+    const { updatedBet, balance } = await prisma.$transaction(async (tx) => {
+      const now = new Date();
+
+      const { count } = await tx.virtualBet.updateMany({
+        where: { id: bet.id, status: 'PENDING' },
+        data: {
+          status: 'WON' as never,
+          pnl,
+          exitOutcomePrice,
+          takeProfitAmount,
+          settledAt: now,
+          closeReason: 'TAKE_PROFIT',
+        } as any,
+      });
+
+      if (count === 0) {
+        throw new Error('BET_NOT_PENDING');
+      }
+
+      const updated = await tx.virtualBet.findUnique({ where: { id: bet.id } });
+      if (!updated) throw new Error('BET_NOT_FOUND_AFTER_UPDATE');
+
+      const user = await tx.user.update({
+        where: { id: bet.userId },
+        data: { balance: { increment: takeProfitAmount } },
+        select: { balance: true },
+      });
+
+      console.log(
+        `[virtual-bet] Bet ${bet.id} cashed out at outcomePrice=${exitOutcomePrice.toFixed(
+          4,
+        )}, takeProfitAmount=$${takeProfitAmount.toFixed(2)}, pnl=$${pnl.toFixed(2)}`,
+      );
+
+      return { updatedBet: updated, balance: user.balance };
+    });
+
+    res.json({
+      id: updatedBet.id,
+      marketSlug: updatedBet.marketSlug,
+      direction: updatedBet.direction,
+      amount: updatedBet.amount,
+      outcomePrice: updatedBet.outcomePrice,
+      potentialPayout: Math.round(updatedBet.potentialPayout * 100) / 100,
+      status: updatedBet.status,
+      pnl: updatedBet.pnl != null ? Math.round(updatedBet.pnl * 100) / 100 : null,
+      balance: Math.round(balance * 100) / 100,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message === 'BET_NOT_PENDING') {
+      res.status(409).json({ error: 'Bet is no longer PENDING' });
+      return;
+    }
+    console.error('[virtual-bet/sell] failed:', message);
     res.status(500).json({ error: message });
   }
 });
@@ -355,6 +490,25 @@ app.get('/api/predict', authMiddleware, async (req, res) => {
 
   try {
     const { market, marketData, result } = await agent.predict(symbol);
+
+    // Nếu không có kèo (NO_BET) thì không lưu vào database
+    if (result.decision.direction === 'NO_BET') {
+      res.json({
+        symbol: symbol.toUpperCase(),
+        timestamp: new Date().toISOString(),
+        current_price: marketData[0]?.current_price ?? null,
+        market: {
+          market_slug: market.market_slug,
+          question: market.question,
+          outcomes: market.outcomes,
+          outcomePrices: market.outcomePrices,
+          clobTokenIds: market.clobTokenIds,
+        },
+        prediction: result.decision,
+        reasoning: result.reasoning,
+      });
+      return;
+    }
 
     const row = await prisma.prediction.create({
       data: {

@@ -71,6 +71,7 @@ export interface VirtualBetResponse {
   outcomePrice: number;
   potentialPayout: number;
   status: 'PENDING' | 'WON' | 'LOST' | 'CANCELLED';
+  displayStatus: 'WIN' | 'LOST' | 'PENDING';
   balance: number;
 }
 
@@ -82,6 +83,7 @@ export interface VirtualBetEntry {
   outcomePrice: number;
   potentialPayout: number;
   status: 'PENDING' | 'WON' | 'LOST' | 'CANCELLED';
+  displayStatus: 'WIN' | 'LOST' | 'PENDING';
   pnl: number | null;
   settledAt: string | null;
   createdAt: string;

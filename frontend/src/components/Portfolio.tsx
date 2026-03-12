@@ -5,9 +5,8 @@ import { useAuth } from '../context/AuthContext';
 
 const STATUS_BADGE = {
   PENDING: 'bg-yellow-500/15 text-yellow-400',
-  WON: 'bg-emerald-500/15 text-emerald-400',
+  WIN: 'bg-emerald-500/15 text-emerald-400',
   LOST: 'bg-red-500/15 text-red-400',
-  CANCELLED: 'bg-gray-500/15 text-gray-400',
 } as const;
 
 const PAGE_SIZE = 10;
@@ -71,19 +70,29 @@ export default function Portfolio() {
           <SummaryCard
             label="Bets"
             value={
-              <span className="space-x-1">
-                <span className="text-emerald-400 font-semibold">
-                  {summary.wonBets} WIN
+              <div className="flex flex-wrap gap-1.5">
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  WIN
+                  <span className="font-mono text-xs text-emerald-100">
+                    {summary.wonBets}
+                  </span>
                 </span>
-                <span className="text-gray-500">/</span>
-                <span className="text-red-400 font-semibold">
-                  {summary.lostBets} LOST
+                <span className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2.5 py-0.5 text-[11px] font-medium text-red-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
+                  LOST
+                  <span className="font-mono text-xs text-red-100">
+                    {summary.lostBets}
+                  </span>
                 </span>
-                <span className="text-gray-500">/</span>
-                <span className="text-yellow-400 font-semibold">
-                  {summary.pendingBets} PENDING
+                <span className="inline-flex items-center gap-1 rounded-full bg-yellow-500/10 px-2.5 py-0.5 text-[11px] font-medium text-yellow-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />
+                  PENDING
+                  <span className="font-mono text-xs text-yellow-100">
+                    {summary.pendingBets}
+                  </span>
                 </span>
-              </span>
+              </div>
             }
             color="text-gray-300"
           />
@@ -153,9 +162,11 @@ export default function Portfolio() {
                     </td>
                     <td className="px-4 py-3 text-center">
                       <span
-                        className={`inline-block rounded-md px-2.5 py-0.5 text-xs font-semibold ${STATUS_BADGE[bet.status]}`}
+                        className={`inline-block rounded-md px-2.5 py-0.5 text-xs font-semibold ${
+                          STATUS_BADGE[bet.displayStatus]
+                        }`}
                       >
-                        {bet.status}
+                        {bet.displayStatus}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right font-mono font-semibold">

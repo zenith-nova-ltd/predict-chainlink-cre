@@ -234,9 +234,7 @@ export default function App() {
           </div>
         )}
 
-        {lastResult && (
-          <PredictionCard data={lastResult} />
-        )}
+        {lastResult && <PredictionCard data={lastResult} />}
       </section>
 
       <Portfolio />

@@ -55,6 +55,8 @@ export interface BtcMarketData {
   outcomes: MarketOutcome[];
   clobTokenIds: string[];
   closed: boolean;
+  /** ISO datetime when this 15m event window starts, if provided (eventStartTime) */
+  eventStartTime?: string;
 }
 
 // --- internal types and helpers ---
@@ -74,6 +76,7 @@ interface PolymarketMarket {
   outcomes?: string;
   outcomePrices?: string;
   clobTokenIds?: string[];
+  eventStartTime?: string;
 }
 
 function parseOutcomes(outcomesJson?: string, pricesJson?: string): MarketOutcome[] {
@@ -135,7 +138,6 @@ export async function fetchBtcUpDownMarkets(options?: {
     for (const market of event.markets || []) {
       const outcomes = parseOutcomes(market.outcomes, market.outcomePrices);
       if (outcomes.length === 0) continue;
-
       results.push({
         id: market.id ?? event.id,
         question: market.question ?? event.title ?? '',
@@ -143,6 +145,7 @@ export async function fetchBtcUpDownMarkets(options?: {
         outcomes,
         clobTokenIds: market.clobTokenIds ?? [],
         closed: !!event.closed,
+        eventStartTime: market.eventStartTime,
       });
     }
   }
