@@ -2,6 +2,7 @@
 import axios from 'axios';
 import https from 'https';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { retry } from '../lib/utils/utils.js';
 
 const GAMMA_API = 'https://gamma-api.polymarket.com';
 const CLOB_API = 'https://clob.polymarket.com';
@@ -39,6 +40,18 @@ function createAxiosAgent(): https.Agent {
 }
 
 const httpsAgent = createAxiosAgent();
+
+function isRetryableNetworkError(err: any): boolean {
+  const code = err?.code;
+  const status = err?.response?.status;
+  return (
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === 'EAI_AGAIN' ||
+    code === 'ENOTFOUND' ||
+    (typeof status === 'number' && (status === 429 || status >= 500))
+  );
+}
 
 /** Market outcome with label and implied probability (0–1) */
 export interface MarketOutcome {
@@ -112,17 +125,30 @@ export async function fetchBtcUpDownMarkets(options?: {
   let events: PolymarketEvent[];
 
   if (slug) {
-    const res = await axios.get(`${GAMMA_API}/events/slug/${encodeURIComponent(slug)}`);
+    const res = await retry(
+      () =>
+        axios.get(`${GAMMA_API}/events/slug/${encodeURIComponent(slug)}`, {
+          httpsAgent,
+          timeout: 15000,
+        }),
+      { maxAttempts: 3, backoffBase: 500, retryOn: isRetryableNetworkError }
+    );
     const event = res.data as PolymarketEvent | null;
     events = event ? [event] : [];
   } else {
-    const res = await axios.get(`${GAMMA_API}/events`, {
-      params: {
-        active: true,
-        closed: false,
-        limit,
-      },
-    });
+    const res = await retry(
+      () =>
+        axios.get(`${GAMMA_API}/events`, {
+          httpsAgent,
+          timeout: 15000,
+          params: {
+            active: true,
+            closed: false,
+            limit,
+          },
+        }),
+      { maxAttempts: 3, backoffBase: 500, retryOn: isRetryableNetworkError }
+    );
     events = res.data as PolymarketEvent[];
   }
 
@@ -155,9 +181,15 @@ export async function fetchBtcUpDownMarkets(options?: {
  * Fetches current mid/price for a single token from the CLOB (e.g. one outcome of a market).
  */
 export async function fetchTokenPrice(tokenId: string, side: 'buy' | 'sell' = 'buy'): Promise<number> {
-  const res = await axios.get(`${CLOB_API}/price`, {
-    params: { token_id: tokenId, side },
-  });
+  const res = await retry(
+    () =>
+      axios.get(`${CLOB_API}/price`, {
+        httpsAgent,
+        timeout: 15000,
+        params: { token_id: tokenId, side },
+      }),
+    { maxAttempts: 3, backoffBase: 500, retryOn: isRetryableNetworkError }
+  );
   return parseFloat((res.data as { price: string }).price);
 }
 
@@ -167,7 +199,15 @@ export async function fetchTokenPrice(tokenId: string, side: 'buy' | 'sell' = 'b
 export async function fetchOrderBook(
   tokenId: string
 ): Promise<{ bids: Array<{ price: string; size: string }>; asks: Array<{ price: string; size: string }> }> {
-  const res = await axios.get(`${CLOB_API}/book`, { params: { token_id: tokenId } });
+  const res = await retry(
+    () =>
+      axios.get(`${CLOB_API}/book`, {
+        httpsAgent,
+        timeout: 15000,
+        params: { token_id: tokenId },
+      }),
+    { maxAttempts: 3, backoffBase: 500, retryOn: isRetryableNetworkError }
+  );
   const data = res.data as {
     bids?: Array<{ price: string; size: string }>;
     asks?: Array<{ price: string; size: string }>;

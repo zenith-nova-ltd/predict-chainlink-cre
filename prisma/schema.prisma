@@ -71,6 +71,10 @@ model VirtualBet {
   closedAt         DateTime? @map("closed_at")
   closeReason      String?  @map("close_reason")
   takeProfitPct    Float    @default(0.2) @map("take_profit_pct")
+  isReal           Boolean  @default(false) @map("is_real")
+  clobOrderId      String?  @map("clob_order_id")
+  clobTokenId      String?  @map("clob_token_id")
+  clobShares       Float?   @map("clob_shares")
   createdAt       DateTime  @default(now()) @map("created_at")
 
   user       User       @relation(fields: [userId], references: [id])

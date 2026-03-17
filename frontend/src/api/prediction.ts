@@ -146,3 +146,46 @@ export async function sellVirtualBet(id: string, exitOutcomePrice: number): Prom
   }
   return data;
 }
+
+// ─── Real Bet Helpers (Polymarket on-chain) ─────────────────────
+
+export async function sellRealBet(params: PlaceBetRequest): Promise<PlaceBetResponse> {
+  const res = await authFetch(`${BASE}/api/real-bet/sell`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  const data = (await res.json()) as PlaceBetResponse;
+  if (!res.ok) {
+    throw new Error(data.error || `Sell real bet failed (${res.status})`);
+  }
+  return data;
+}
+
+export async function sellRealBetFromShadow(betId: string, price: number): Promise<PlaceBetResponse> {
+  const res = await authFetch(`${BASE}/api/real-bet/${encodeURIComponent(betId)}/sell-from-shadow`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ price }),
+  });
+  const data = (await res.json()) as PlaceBetResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || `Sell real bet failed (${res.status})`);
+  }
+  return data;
+}
+
+// Register a "shadow" virtual bet corresponding to a real on-chain bet
+// so that auto-sell logic can reuse the same virtualBet table.
+export async function registerRealBet(params: VirtualBetRequest): Promise<VirtualBetResponse> {
+  const res = await authFetch(`${BASE}/api/real-bet/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  const data = (await res.json()) as VirtualBetResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || `Register real bet failed (${res.status})`);
+  }
+  return data;
+}

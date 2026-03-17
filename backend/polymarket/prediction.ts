@@ -21,6 +21,8 @@ function getIndicatorsByIds(ids: string[]): IndicatorDefinition[] {
 
 import { buildPolymarketUpDownPrompt, buildTools } from './prompts.js';
 import { delay, roundOrNull, roundSeries } from '../lib/utils/utils.js';
+import https from 'https';
+import { retry } from '../lib/utils/utils.js';
 
 /** Tool call + chat types (from decisionMaker.ts pattern) */
 interface ChatMessage {
@@ -238,10 +240,30 @@ export class PolymarketUpDownAgent {
       'X-Title': 'polymarket-updown-agent',
     };
 
-    const response = await axios.post(this.baseUrl, payload, {
-      headers,
-      timeout: 60000,
-    });
+    const httpsAgent = new https.Agent({ family: 4 });
+    const response = await retry(
+      () =>
+        axios.post(this.baseUrl, payload, {
+          headers,
+          timeout: 60000,
+          httpsAgent,
+        }),
+      {
+        maxAttempts: 3,
+        backoffBase: 750,
+        retryOn: (err) => {
+          const code = err?.code;
+          const status = err?.response?.status;
+          return (
+            code === 'ECONNRESET' ||
+            code === 'ETIMEDOUT' ||
+            code === 'EAI_AGAIN' ||
+            code === 'ENOTFOUND' ||
+            (typeof status === 'number' && (status === 429 || status >= 500))
+          );
+        },
+      }
+    );
 
     if (response.status !== 200) {
       const errorText =

@@ -61,6 +61,9 @@ export interface VirtualBetRequest {
   predictionId: string;
   direction: 'UP' | 'DOWN';
   amount: number;
+  clobOrderId?: string;
+  clobTokenId?: string;
+  clobShares?: number;
 }
 
 export interface VirtualBetResponse {

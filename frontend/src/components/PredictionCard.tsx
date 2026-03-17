@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getVirtualBets, placeVirtualBet, sellVirtualBet } from '../api/prediction';
+import { getVirtualBets, placeVirtualBet, sellVirtualBet, sellRealBetFromShadow } from '../api/prediction';
 import { useAuth } from '../context/AuthContext';
 import type { PredictionResponse } from '../types';
 
@@ -15,7 +15,15 @@ const DIRECTION_STYLES = {
 
 const QUICK_AMOUNTS = [10, 25, 50, 100, 250, 500];
 
-export default function PredictionCard({ data }: { data: PredictionResponse & { id?: string } }) {
+type BetMode = 'VIRTUAL' | 'REAL';
+
+export default function PredictionCard({
+  data,
+  betMode = 'VIRTUAL',
+}: {
+  data: PredictionResponse & { id?: string };
+  betMode?: BetMode;
+}) {
   const { user, profile, refreshProfile } = useAuth();
   const queryClient = useQueryClient();
   const [showReasoning, setShowReasoning] = useState(false);
@@ -370,19 +378,52 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
       const entryPrice = bet.outcomePrice;
       if (!entryPrice || entryPrice <= 0) continue;
 
-      const targetPrice = entryPrice * 1.2;
+      const targetPrice = entryPrice * 1.1;
+      console.log("targetPrice", { entryPrice, targetPrice });
+
       if (livePrice >= targetPrice) {
+        console.log('[auto-sell] target reached', {
+          betId: bet.id,
+          direction: bet.direction,
+          entryPrice,
+          livePrice,
+          targetPrice,
+          mode: betMode,
+          marketSlug: marketKey,
+        });
+
         autoSellTriggeredRef.current.add(bet.id);
-        sellVirtualBet(bet.id, livePrice)
-          .then(() => {
-            refreshProfile();
-            queryClient.invalidateQueries({ queryKey: ['virtual-bets'] });
-            queryClient.invalidateQueries({ queryKey: ['bet-summary'] });
-          })
-          .catch((err: Error) => {
-            autoSellTriggeredRef.current.delete(bet.id);
-            console.error('[auto-sell] failed', err.message);
-          });
+
+        if (betMode === 'VIRTUAL') {
+          sellVirtualBet(bet.id, livePrice)
+            .then(() => {
+              refreshProfile();
+              queryClient.invalidateQueries({ queryKey: ['virtual-bets'] });
+              queryClient.invalidateQueries({ queryKey: ['bet-summary'] });
+            })
+            .catch((err: Error) => {
+              autoSellTriggeredRef.current.delete(bet.id);
+              console.error('[auto-sell] failed (virtual)', {
+                betId: bet.id,
+                error: err.message,
+              });
+            });
+        } else {
+          sellRealBetFromShadow(bet.id, livePrice)
+            .then(() => {
+              console.log('[auto-sell] real SELL placed', {
+                betId: bet.id,
+                livePrice,
+              });
+            })
+            .catch((err: Error) => {
+              autoSellTriggeredRef.current.delete(bet.id);
+              console.error('[auto-sell] failed (real)', {
+                betId: bet.id,
+                error: err.message,
+              });
+            });
+        }
       }
     }
   }, [
@@ -397,6 +438,7 @@ export default function PredictionCard({ data }: { data: PredictionResponse & { 
     refreshProfile,
     queryClient,
     data.market.outcomePrices,
+    betMode,
   ]);
 
   const canBet = !!user && !!predictionId && usdAmount > 0 && usdAmount <= balance;

@@ -41,7 +41,12 @@ export function roundOrNull(value: number | null | undefined, decimals: number):
         return await fn();
       } catch (error: any) {
         lastError = error;
-        
+
+        const shouldRetry = options.retryOn ? options.retryOn(error) : true;
+        if (!shouldRetry) {
+          throw error;
+        }
+
         if (attempt < maxAttempts) {
           const delayMs = backoffBase * Math.pow(2, attempt - 1);
           await delay(delayMs);

@@ -740,7 +740,23 @@ app.post('/api/real-bet/:id/sell-from-shadow', authMiddleware, async (req, res) 
 
     // Consider "filled" when matched size reaches (almost) intended shares.
     const intended = realBet.clobShares as number;
-    const isFilledEnough = status === 'filled' || status === 'complete' || status === 'completed';
+    const fillRatio = intended > 0 ? matchedSize / intended : 0;
+    const isFilledEnough =
+      status === 'matched' ||
+      status === 'filled' ||
+      status === 'complete' ||
+      status === 'completed' ||
+      fillRatio >= 0.999;
+
+    console.log('[real-bet/sell-from-shadow] fill check', {
+      betId,
+      status,
+      matchedSize,
+      originalSize,
+      intendedShares: intended,
+      fillRatio: fillRatio.toFixed(4),
+      isFilledEnough,
+    });
 
     if (!isFilledEnough) {
       console.log('[real-bet/sell-from-shadow] order not filled enough, skipping SELL', {
@@ -749,6 +765,7 @@ app.post('/api/real-bet/:id/sell-from-shadow', authMiddleware, async (req, res) 
         matchedSize,
         originalSize,
         intendedShares: intended,
+        fillRatio: fillRatio.toFixed(4),
       });
       res.status(409).json({
         error: 'ORDER_NOT_FILLED',
