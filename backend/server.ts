@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { ethers } from 'ethers';
 import { PolymarketUpDownAgent } from './polymarket/prediction.js';
-import { placePolymarketBet } from './polymarket/placeBet.js';
+import { getPolymarketOrder, placePolymarketBet } from './polymarket/placeBet.js';
 import prisma from './lib/db.js';
 import { authMiddleware, signToken } from './auth/middleware.js';
 import { startSettlementCron } from './services/settlement.ts';
@@ -17,6 +17,33 @@ app.use(express.json());
 
 const agent = new PolymarketUpDownAgent();
 
+// Polymarket CLOB yêu cầu tối thiểu một số "shares" nhất định mỗi lệnh.
+// Mặc định dùng 5 shares nếu không cấu hình khác qua env.
+const POLY_MIN_SHARES =
+  process.env.POLY_MIN_SHARES != null && process.env.POLY_MIN_SHARES !== ''
+    ? Number(process.env.POLY_MIN_SHARES)
+    : 5;
+
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).filter((s) => s.trim().length > 0);
+
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (!s) return [];
+    if (s.startsWith('[') && s.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(s) as unknown;
+        if (Array.isArray(parsed)) return parsed.map(String).filter((x) => x.trim().length > 0);
+      } catch {
+        // fall through
+      }
+    }
+    return [s];
+  }
+
+  return [];
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function toHistoryResponse(row: Record<string, any>) {
   return {
@@ -29,7 +56,7 @@ function toHistoryResponse(row: Record<string, any>) {
       question: row.question,
       outcomes: row.outcomes as string[],
       outcomePrices: row.outcomePrices as number[],
-      clobTokenIds: (row.clobTokenIds as string[]) ?? [],
+      clobTokenIds: normalizeStringArray(row.clobTokenIds),
     },
     prediction: {
       market_slug: row.marketSlug,
@@ -47,7 +74,7 @@ function toHistoryResponse(row: Record<string, any>) {
 app.get('/api/auth/nonce', async (req, res) => {
   try {
     const address = (req.query.address as string | undefined)?.trim().toLowerCase();
-    if (!address || !ethers.isAddress(address)) {
+    if (!address || !ethers.utils.isAddress(address)) {
       res.status(400).json({ error: 'Invalid wallet address' });
       return;
     }
@@ -86,7 +113,7 @@ app.post('/api/auth/verify', async (req, res) => {
     }
 
     const message = `Sign this message to login to Prediction Bot.\n\nNonce: ${user.nonce}`;
-    const recoveredAddress = ethers.verifyMessage(message, signature).toLowerCase();
+    const recoveredAddress = ethers.utils.verifyMessage(message, signature).toLowerCase();
 
     if (recoveredAddress !== normalizedAddress) {
       res.status(401).json({ error: 'Signature verification failed' });
@@ -279,6 +306,90 @@ app.post('/api/virtual-bet', authMiddleware, async (req, res) => {
   }
 });
 
+// Register a "shadow" virtual bet for a real on-chain order so that
+// auto-sell & history can reuse the same virtualBet table.
+app.post('/api/real-bet/register', authMiddleware, async (req, res) => {
+  try {
+    const { predictionId, direction, amount, clobOrderId, clobTokenId, clobShares } = req.body as {
+      predictionId?: string;
+      direction?: 'UP' | 'DOWN';
+      amount?: number;
+      clobOrderId?: string;
+      clobTokenId?: string;
+      clobShares?: number;
+    };
+
+    if (!predictionId || !direction || !amount || amount <= 0) {
+      res
+        .status(400)
+        .json({ error: 'Missing or invalid fields: predictionId, direction, amount' });
+      return;
+    }
+
+    if (direction !== 'UP' && direction !== 'DOWN') {
+      res.status(400).json({ error: 'Direction must be UP or DOWN' });
+      return;
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.user!.userId } });
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    const prediction = await prisma.prediction.findUnique({ where: { id: predictionId } });
+    if (!prediction) {
+      res.status(404).json({ error: 'Prediction not found' });
+      return;
+    }
+
+    const outcomes = prediction.outcomes as string[];
+    const prices = prediction.outcomePrices as number[];
+    const dirIndex = outcomes.findIndex((o) => o.toLowerCase() === direction.toLowerCase());
+    const outcomePrice = prices[dirIndex] ?? 0.5;
+    const potentialPayout = amount / outcomePrice;
+
+    const bet = await prisma.virtualBet.create({
+      data: {
+        userId: user.id,
+        predictionId,
+        marketSlug: prediction.marketSlug,
+        direction,
+        amount,
+        outcomePrice,
+        potentialPayout,
+        // NOTE: these fields require a Prisma migration + generate
+        isReal: true,
+        clobOrderId: clobOrderId?.trim() || null,
+        clobTokenId: clobTokenId?.trim() || null,
+        clobShares: Number.isFinite(clobShares as number) ? (clobShares as number) : null,
+      } as any,
+    });
+
+    console.log(
+      `[real-bet/register] Shadow virtual bet ${bet.id} created for real order. Amount=$${amount.toFixed(
+        2,
+      )}, outcomePrice=${outcomePrice.toFixed(4)}, potentialPayout=$${potentialPayout.toFixed(2)}`,
+    );
+
+    res.json({
+      id: bet.id,
+      marketSlug: bet.marketSlug,
+      direction: bet.direction,
+      amount: bet.amount,
+      outcomePrice: bet.outcomePrice,
+      potentialPayout: Math.round(bet.potentialPayout * 100) / 100,
+      status: bet.status,
+      // Balance is unchanged for real bets; return current balance for convenience
+      balance: Math.round(user.balance * 100) / 100,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[real-bet/register] failed:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
 app.get('/api/virtual-bets', authMiddleware, async (req, res) => {
   try {
     const status = (Array.isArray(req.query.status) ? req.query.status[0] : req.query.status) as
@@ -390,6 +501,12 @@ app.post('/api/virtual-bet/:id/sell', authMiddleware, async (req, res) => {
     }
     const { exitOutcomePrice } = req.body as { exitOutcomePrice?: number };
 
+    console.log('[virtual-bet/sell] incoming request', {
+      betId,
+      exitOutcomePrice,
+      userId: req.user!.userId,
+    });
+
     if (!exitOutcomePrice || !Number.isFinite(exitOutcomePrice) || exitOutcomePrice <= 0 || exitOutcomePrice > 1.0001) {
       res.status(400).json({ error: 'Invalid exitOutcomePrice. Must be in (0, 1].' });
       return;
@@ -400,16 +517,28 @@ app.post('/api/virtual-bet/:id/sell', authMiddleware, async (req, res) => {
     });
 
     if (!bet || bet.userId !== req.user!.userId) {
+      console.warn('[virtual-bet/sell] bet not found or not owned by user', {
+        betId,
+        userId: req.user!.userId,
+      });
       res.status(404).json({ error: 'Virtual bet not found' });
       return;
     }
 
     if (bet.status !== 'PENDING') {
+      console.warn('[virtual-bet/sell] bet not pending', {
+        betId,
+        status: bet.status,
+      });
       res.status(400).json({ error: `Bet is not PENDING (current status: ${bet.status})` });
       return;
     }
 
     if (!bet.outcomePrice || bet.outcomePrice <= 0) {
+      console.error('[virtual-bet/sell] invalid outcomePrice on bet', {
+        betId,
+        outcomePrice: bet.outcomePrice,
+      });
       res.status(400).json({ error: 'Invalid stored outcomePrice for bet' });
       return;
     }
@@ -474,6 +603,192 @@ app.post('/api/virtual-bet/:id/sell', authMiddleware, async (req, res) => {
       return;
     }
     console.error('[virtual-bet/sell] failed:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
+function normalizeOrderStatus(raw: unknown): string {
+  if (!raw) return '';
+  if (typeof raw === 'string') return raw.toLowerCase();
+  return String(raw).toLowerCase();
+}
+
+function extractMatchedSize(order: any): number {
+  const candidates = [
+    order?.size_matched,
+    order?.sizeMatched,
+    order?.matched_size,
+    order?.matchedSize,
+    order?.filled_size,
+    order?.filledSize,
+    order?.filled,
+  ];
+  for (const c of candidates) {
+    const n = typeof c === 'string' || typeof c === 'number' ? Number(c) : NaN;
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+}
+
+function extractOriginalSize(order: any): number {
+  const candidates = [order?.size, order?.original_size, order?.originalSize];
+  for (const c of candidates) {
+    const n = typeof c === 'string' || typeof c === 'number' ? Number(c) : NaN;
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+}
+
+// Debug/utility: check Polymarket CLOB order status for a recorded real bet
+app.get('/api/real-bet/:id/order-status', authMiddleware, async (req, res) => {
+  try {
+    const betId = String((req.params as Record<string, unknown>)?.id ?? '').trim();
+    if (!betId) {
+      res.status(400).json({ error: 'Missing bet id' });
+      return;
+    }
+
+    const bet = await prisma.virtualBet.findUnique({ where: { id: betId } });
+    if (!bet || bet.userId !== req.user!.userId) {
+      res.status(404).json({ error: 'Bet not found' });
+      return;
+    }
+    const realBet = bet as any;
+    if (!realBet.isReal || !realBet.clobOrderId) {
+      res.status(400).json({ error: 'Bet is not a real bet or missing clobOrderId' });
+      return;
+    }
+    console.log(realBet.clobOrderId);
+    const order = await getPolymarketOrder(realBet.clobOrderId);
+    const status = normalizeOrderStatus((order as any)?.status);
+    const matchedSize = extractMatchedSize(order as any);
+    const originalSize = extractOriginalSize(order as any);
+
+    res.json({
+      betId: bet.id,
+      clobOrderId: realBet.clobOrderId,
+      status,
+      matchedSize,
+      originalSize,
+      order,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[real-bet/order-status] failed:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
+// Real auto-sell: only sell after BUY is actually matched/filled.
+app.post('/api/real-bet/:id/sell-from-shadow', authMiddleware, async (req, res) => {
+  try {
+    const betId = String((req.params as Record<string, unknown>)?.id ?? '').trim();
+    const { price } = req.body as { price?: number };
+
+    console.log('[real-bet/sell-from-shadow] incoming request', {
+      betId,
+      price,
+      userId: req.user!.userId,
+    });
+
+    if (!betId) {
+      res.status(400).json({ error: 'Missing bet id' });
+      return;
+    }
+    if (!price || !Number.isFinite(price) || price <= 0 || price > 1.0001) {
+      res.status(400).json({ error: 'Invalid price. Must be in (0, 1].' });
+      return;
+    }
+
+    const bet = await prisma.virtualBet.findUnique({ where: { id: betId } });
+    if (!bet || bet.userId !== req.user!.userId) {
+      res.status(404).json({ error: 'Bet not found' });
+      return;
+    }
+    const realBet = bet as any;
+    if (!realBet.isReal) {
+      console.warn('[real-bet/sell-from-shadow] bet is not marked as real', {
+        betId,
+      });
+      res.status(400).json({ error: 'Bet is not a real bet' });
+      return;
+    }
+    if (bet.status !== 'PENDING') {
+      console.warn('[real-bet/sell-from-shadow] bet is not pending', {
+        betId,
+        status: bet.status,
+      });
+      res.status(400).json({ error: `Bet is not PENDING (current status: ${bet.status})` });
+      return;
+    }
+    if (!realBet.clobOrderId || !realBet.clobTokenId || !realBet.clobShares || realBet.clobShares <= 0) {
+      console.error('[real-bet/sell-from-shadow] missing clob info on bet', {
+        betId,
+        clobOrderId: realBet.clobOrderId,
+        clobTokenId: realBet.clobTokenId,
+        clobShares: realBet.clobShares,
+      });
+      res.status(400).json({ error: 'Missing clobOrderId/clobTokenId/clobShares for this real bet' });
+      return;
+    }
+
+    const order = await getPolymarketOrder(realBet.clobOrderId);
+    console.log('[real-bet/sell-from-shadow] order:', order);
+    const status = normalizeOrderStatus((order as any)?.status);
+    const matchedSize = extractMatchedSize(order as any);
+    const originalSize = extractOriginalSize(order as any);
+
+    // Consider "filled" when matched size reaches (almost) intended shares.
+    const intended = realBet.clobShares as number;
+    const isFilledEnough = status === 'filled' || status === 'complete' || status === 'completed';
+
+    if (!isFilledEnough) {
+      console.log('[real-bet/sell-from-shadow] order not filled enough, skipping SELL', {
+        betId,
+        status,
+        matchedSize,
+        originalSize,
+        intendedShares: intended,
+      });
+      res.status(409).json({
+        error: 'ORDER_NOT_FILLED',
+        details: {
+          status,
+          matchedSize,
+          originalSize,
+          intendedShares: intended,
+        },
+      });
+      return;
+    }
+
+    const sizeToSell = Math.min(matchedSize || intended, intended);
+    console.log('[real-bet/sell-from-shadow] placing SELL order', {
+      betId,
+      tokenId: realBet.clobTokenId,
+      price,
+      sizeToSell,
+      matchedSize,
+      intendedShares: intended,
+    });
+    const result = await placePolymarketBet({
+      tokenId: realBet.clobTokenId,
+      price,
+      size: sizeToSell,
+      side: 'SELL',
+    });
+
+    console.log('[real-bet/sell-from-shadow] SELL order placed successfully', {
+      betId,
+      tokenId: realBet.clobTokenId,
+      price,
+      sizeToSell,
+    });
+
+    res.json({ success: true, order: result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[real-bet/sell-from-shadow] failed:', message);
     res.status(500).json({ error: message });
   }
 });
@@ -570,17 +885,105 @@ app.post('/api/place-bet', async (req, res) => {
       return;
     }
 
+    const resolvedSide: 'BUY' | 'SELL' = side ?? 'BUY';
+
+    // Interpret incoming BUY "size" as USD notional (Auto uses this endpoint)
+    let finalSize = size;
+    if (resolvedSide === 'BUY') {
+      let usdNotional = size;
+
+      const minUsdRaw = process.env.AUTO_MIN_BET_USD;
+      const maxUsdRaw = process.env.AUTO_MAX_BET_USD;
+      const minUsd = minUsdRaw != null && minUsdRaw !== '' ? Number(minUsdRaw) : 1;
+      const maxUsd =
+        maxUsdRaw != null && maxUsdRaw !== '' ? Number(maxUsdRaw) : Number.POSITIVE_INFINITY;
+
+      if (!Number.isFinite(usdNotional) || usdNotional <= 0) {
+        res.status(400).json({ error: 'Invalid size (USD) for BUY order' });
+        return;
+      }
+
+      // Clamp USD notional vào [minUsd, maxUsd]
+      if (Number.isFinite(minUsd) && usdNotional < minUsd) {
+        usdNotional = minUsd;
+      }
+      if (Number.isFinite(maxUsd) && usdNotional > maxUsd) {
+        usdNotional = maxUsd;
+      }
+
+      // Convert USD notional -> shares cho Polymarket CLOB
+      finalSize = usdNotional / price;
+
+      // Đảm bảo thỏa min shares của Polymarket
+      if (Number.isFinite(POLY_MIN_SHARES) && finalSize < POLY_MIN_SHARES) {
+        finalSize = POLY_MIN_SHARES;
+      }
+    }
+
     const result = await placePolymarketBet({
       tokenId,
       price,
-      size,
-      side: side ?? 'BUY',
+      size: finalSize,
+      side: resolvedSide,
     });
 
     res.json({ success: true, order: result });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[place-bet] failed:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
+// Real position take-profit helper (server-side Polymarket order)
+app.post('/api/real-bet/sell', async (req, res) => {
+  try {
+    const { tokenId, price, size } = req.body as {
+      tokenId?: string;
+      price?: number;
+      size?: number;
+    };
+
+    console.log('[real-bet/sell] incoming request:', {
+      tokenId,
+      price,
+      size,
+    });
+
+    if (!tokenId || price == null || size == null) {
+      res.status(400).json({ error: 'Missing required fields: tokenId, price, size' });
+      return;
+    }
+
+    const notional = price * size;
+    if (notional < 1 || size < POLY_MIN_SHARES) {
+      res.status(400).json({
+        error: `Order too small for SELL: notional=$${notional.toFixed(
+          2,
+        )}, size=${size.toFixed(2)}. Minimum is $1 notional and ${POLY_MIN_SHARES} shares.`,
+      });
+      return;
+    }
+    console.log('[real-bet/sell] order placed successfully:', {
+      tokenId,
+      price,
+      size,
+      notional,
+      side: 'SELL',
+    });
+    const result = await placePolymarketBet({
+      tokenId,
+      price,
+      size,
+      side: 'SELL',
+    });
+
+   
+
+    res.json({ success: true, order: result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[real-bet/sell] failed:', message);
     res.status(500).json({ error: message });
   }
 });

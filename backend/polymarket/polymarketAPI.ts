@@ -39,7 +39,6 @@ function createAxiosAgent(): https.Agent {
 }
 
 const httpsAgent = createAxiosAgent();
-const axiosConfig = { httpsAgent, httpAgent: httpsAgent };
 
 /** Market outcome with label and implied probability (0–1) */
 export interface MarketOutcome {
@@ -113,12 +112,11 @@ export async function fetchBtcUpDownMarkets(options?: {
   let events: PolymarketEvent[];
 
   if (slug) {
-    const res = await axios.get(`${GAMMA_API}/events/slug/${encodeURIComponent(slug)}`, axiosConfig);
+    const res = await axios.get(`${GAMMA_API}/events/slug/${encodeURIComponent(slug)}`);
     const event = res.data as PolymarketEvent | null;
     events = event ? [event] : [];
   } else {
     const res = await axios.get(`${GAMMA_API}/events`, {
-      ...axiosConfig,
       params: {
         active: true,
         closed: false,
@@ -158,7 +156,6 @@ export async function fetchBtcUpDownMarkets(options?: {
  */
 export async function fetchTokenPrice(tokenId: string, side: 'buy' | 'sell' = 'buy'): Promise<number> {
   const res = await axios.get(`${CLOB_API}/price`, {
-    ...axiosConfig,
     params: { token_id: tokenId, side },
   });
   return parseFloat((res.data as { price: string }).price);
@@ -170,7 +167,7 @@ export async function fetchTokenPrice(tokenId: string, side: 'buy' | 'sell' = 'b
 export async function fetchOrderBook(
   tokenId: string
 ): Promise<{ bids: Array<{ price: string; size: string }>; asks: Array<{ price: string; size: string }> }> {
-  const res = await axios.get(`${CLOB_API}/book`, { ...axiosConfig, params: { token_id: tokenId } });
+  const res = await axios.get(`${CLOB_API}/book`, { params: { token_id: tokenId } });
   const data = res.data as {
     bids?: Array<{ price: string; size: string }>;
     asks?: Array<{ price: string; size: string }>;

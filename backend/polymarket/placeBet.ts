@@ -1,70 +1,108 @@
-/**
- * Simple helper to place an order (bet) on Polymarket using the CLOB client.
- *
- * Requirements:
- * - Install deps: npm install @polymarket/clob-client
- * - Set env PRIVATE_KEY to your Polygon wallet private key (EOA with USDCe).
- *
- * This follows the official quickstart:
- * https://docs.polymarket.com/quickstart/first-order
- */
+// backend/polymarket/placeBet.ts
 import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
 import { Wallet } from 'ethers';
+import dotenv from 'dotenv';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import https from 'https';
+
+
+dotenv.config();
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 const POLYGON_CHAIN_ID = 137; // Polygon mainnet
 
-export interface PlaceBetParams {
-  tokenId: string; // CLOB token id for the outcome (from Gamma API: clobTokenIds)
-  price: number; // Price per share, e.g. 0.55
-  size: number; // Number of shares, e.g. 10
-  side: 'BUY' | 'SELL'; // BUY or SELL
-}
+export type PlaceBetParams = {
+  tokenId: string;
+  price: number;
+  size: number;
+  side: 'BUY' | 'SELL';
+};
 
-/**
- * Place a single limit order on Polymarket.
- * - Derives/uses user API credentials.
- * - Assumes you are trading as an EOA (signatureType = 0) with your own USDCe.
- */
-export async function placePolymarketBet(params: PlaceBetParams) {
-  const privateKey = process.env.PRIVATE_KEY;
-  if (!privateKey) {
-    throw new Error('Missing PRIVATE_KEY in environment');
+// --- THÊM: parse proxy giống polymarketAPI.ts ---
+function parseProxyUrl(proxy: string): string {
+  const trimmed = proxy.trim();
+
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    return trimmed;
   }
 
+  // host:port:user:password
+  const parts = trimmed.split(':');
+  if (parts.length >= 4) {
+    const host = parts[0] ?? '';
+    const port = parts[1] ?? '';
+    const user = encodeURIComponent(parts[2] ?? '');       // ✅ encode
+    const password = encodeURIComponent(parts.slice(3).join(':')); // ✅ encode
+    return `http://${user}:${password}@${host}:${port}`;
+  }
+
+  return trimmed;
+}
+function createAxiosAgent() {
+  const raw =
+    process.env.POLY_PROXY ||
+    process.env.POLYMARKET_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY;
+  const proxyUrl = raw ? parseProxyUrl(raw) : '';
+  delete process.env.HTTP_PROXY;
+  delete process.env.HTTPS_PROXY;
+  (https.globalAgent as any) = new HttpsProxyAgent(proxyUrl);
+}
+
+async function createAuthedClobClient(): Promise<ClobClient> {
+  // createAxiosAgent(); // disabled for now; enable if needed
+
+  const privateKey = process.env.PRIVATE_KEY;
+  if (!privateKey) throw new Error('Missing PRIVATE_KEY');
   const signer = new Wallet(privateKey);
-  // ClobClient may expect ethers v5 Wallet; ethers v6 Wallet is compatible at runtime
   const signerForClob = signer as unknown as ConstructorParameters<typeof ClobClient>[2];
-  const baseClient = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signerForClob);
-  const userApiCreds = await baseClient.createOrDeriveApiKey();
 
-  const SIGNATURE_TYPE = 0; // 0 = EOA (you pay gas, use your own wallet)
-  const FUNDER_ADDRESS = signer.address;
+  const PROXY_WALLET = process.env.PROXY_WALLET;
 
-  const client = new ClobClient(
+  const tempClient = new ClobClient(
     CLOB_HOST,
     POLYGON_CHAIN_ID,
-    signerForClob,
-    userApiCreds,
-    SIGNATURE_TYPE,
-    FUNDER_ADDRESS
+    signer,
+    undefined, // chưa có creds
+    2, // GNOSIS_SAFE
+    PROXY_WALLET,
   );
 
-  const market = await client.getMarket(params.tokenId);
-  const sideEnum = params.side === 'BUY' ? Side.BUY : Side.SELL;
+  let userApiCreds;
+  try {
+    userApiCreds = await tempClient.createOrDeriveApiKey();
+  } catch (err) {
+    throw new Error(`[Auth] Failed to get API key — proxy bị chặn hoặc sai config: ${err}`);
+  }
+
+  if (!userApiCreds?.key || !userApiCreds?.secret) {
+    throw new Error('[Auth] API key trống — createOrDeriveApiKey thất bại silently');
+  }
+
+  return new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signerForClob, userApiCreds, 2, PROXY_WALLET);
+}
+
+export async function getPolymarketOrder(orderId: string) {
+  if (!orderId?.trim()) throw new Error('Missing orderId');
+  const client = await createAuthedClobClient();
+  return client.getOrder(orderId.trim());
+}
+
+export async function placePolymarketBet(params: PlaceBetParams) {
+  const client = await createAuthedClobClient();
 
   const response = await client.createAndPostOrder(
     {
       tokenID: params.tokenId,
       price: params.price,
       size: params.size,
-      side: sideEnum,
+      side: params.side === 'BUY' ? Side.BUY : Side.SELL,
     },
     {
-      tickSize: market.tickSize,
-      negRisk: market.negRisk,
+      tickSize: "0.01",
+      negRisk: false,
     },
-    OrderType.GTC // Good-Til-Cancelled
   );
 
   return response;
