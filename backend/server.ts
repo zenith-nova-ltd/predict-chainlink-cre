@@ -7,6 +7,7 @@ import { getPolymarketOrder, placePolymarketBet } from './polymarket/placeBet.js
 import prisma from './lib/db.js';
 import { authMiddleware, signToken } from './auth/middleware.js';
 import { startSettlementCron } from './services/settlement.ts';
+import { startRealBetMonitorCron } from './services/realBetMonitor.ts';
 
 dotenv.config();
 
@@ -1011,4 +1012,5 @@ app.listen(PORT, () => {
   console.log(`Prediction API running on http://localhost:${PORT}`);
   console.log(`Try: GET http://localhost:${PORT}/api/predict?symbol=BTC`);
   startSettlementCron();
+  startRealBetMonitorCron();
 });

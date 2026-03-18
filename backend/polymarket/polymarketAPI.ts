@@ -6,6 +6,7 @@ import { retry } from '../lib/utils/utils.js';
 
 const GAMMA_API = 'https://gamma-api.polymarket.com';
 const CLOB_API = 'https://clob.polymarket.com';
+const DATA_API = 'https://data-api.polymarket.com';
 
 // Parse proxy string "host:port:username:password" -> "http://username:password@host:port"
 function parseProxyUrl(proxy: string): string {
@@ -191,6 +192,43 @@ export async function fetchTokenPrice(tokenId: string, side: 'buy' | 'sell' = 'b
     { maxAttempts: 3, backoffBase: 500, retryOn: isRetryableNetworkError }
   );
   return parseFloat((res.data as { price: string }).price);
+}
+
+/**
+ * Shape of a single position entry from the Data API.
+ */
+export interface UserPosition {
+  proxyWallet: string;
+  asset: string;          // token ID (clobTokenId)
+  conditionId: string;
+  size: number;           // shares currently held
+  avgPrice: number;       // average entry price (0 if unknown)
+  curPrice: number;       // current market price
+  currentValue: number;
+  cashPnl: number;
+  redeemable: boolean;    // true when market is resolved
+  title: string;
+  slug: string;
+  outcome: string;
+  endDate: string;
+}
+
+/**
+ * Fetch current positions (shares held) for a wallet address.
+ * Uses the public Data API — no authentication required.
+ * @param walletAddress The proxy wallet address stored in PROXY_WALLET env var.
+ */
+export async function getUserPositions(walletAddress: string): Promise<UserPosition[]> {
+  const res = await retry(
+    () =>
+      axios.get(`${DATA_API}/positions`, {
+        httpsAgent,
+        timeout: 15000,
+        params: { user: walletAddress.toLowerCase() },
+      }),
+    { maxAttempts: 3, backoffBase: 500, retryOn: isRetryableNetworkError },
+  );
+  return (res.data ?? []) as UserPosition[];
 }
 
 /**

@@ -89,6 +89,16 @@ export async function getPolymarketOrder(orderId: string) {
   return client.getOrder(orderId.trim());
 }
 
+/**
+ * Fetch all on-chain trades for a specific token from Polymarket CLOB.
+ * Returns BUY + SELL fills for the authenticated wallet.
+ * Use BUY fills to compute the real weighted-average entry price.
+ */
+export async function getUserTradesForToken(tokenId: string) {
+  const client = await createAuthedClobClient();
+  return client.getTrades({ asset_id: tokenId });
+}
+
 export async function placePolymarketBet(params: PlaceBetParams) {
   const client = await createAuthedClobClient();
 
