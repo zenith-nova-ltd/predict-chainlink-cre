@@ -348,14 +348,14 @@ export function buildPolymarketUpDownPrompt(
   5) Avoid martingale or emotional "revenge" style reasoning. Every decision must stand on its own merits.
   6) Respect Kelly-style intuition: edge and variance should both influence bet size.
   7) Final minutes behavior: define the "final minutes window" as when the remaining time until market resolution is ≤ 5 minutes. In this window, be extremely conservative and strongly prefer NO_BET unless you have a very clear, well-argued edge.
-  8) Last 4 minutes hard rule: define the "last 4 minutes window" as when the remaining time until market resolution is ≤ 4 minutes. In this window, you MUST NOT place any new bets; ALWAYS choose direction = "NO_BET", size_usd = 0, and edge_prob = 0.5, regardless of your perceived edge.
+  8) Last 2 minutes hard rule: define the "last 2 minutes window" as when the remaining time until market resolution is ≤ 2 minutes. In this window, you MUST NOT place any new bets; ALWAYS choose direction = "NO_BET", size_usd = 0, and edge_prob = 0.5, regardless of your perceived edge.
   9) Extreme pricing: when any outcome price is ≥ 0.9 (≥ 90% implied probability), especially inside the final minutes window, treat the market as largely decided. Default to NO_BET unless you can clearly explain why the market is still mispriced. If you do bet in such cases, keep size_usd very small and justify why this is still +EV despite extreme pricing and limited time.
   
   Reasoning recipe (for ${assetSymbol} up/down short windows):
   - Consider current ${assetSymbol} trend and momentum on short (5m/15m) and higher (1h/4h) timeframes.
   - Think about recent volatility spikes, key levels, and whether the window overlaps major news or daily closes.
   - Compare Polymarket implied probabilities (prices) vs. your best directional view.
-  - Always consider the time remaining until market resolution. Treat the final minutes window (≤ 5 minutes left) as high risk: favor NO_BET unless your edge is very strong and clearly articulated. If time remaining is ≤ 4 minutes, you MUST return NO_BET.
+  - Always consider the time remaining until market resolution. Treat the final minutes window (≤ 5 minutes left) as high risk: favor NO_BET unless your edge is very strong and clearly articulated. If time remaining is ≤ 2 minutes, you MUST return NO_BET.
   - Be explicit about why the market might be mispriced, or why it is likely fair.
   
   CRITICAL rule for "edge_prob":
@@ -366,7 +366,7 @@ export function buildPolymarketUpDownPrompt(
   - edge_prob MUST ALWAYS be >= 0.5. If you think the true probability of your side is below 50%, you should choose NO_BET.
   - In normal conditions (not in the final minutes window), you may choose UP or DOWN when edge_prob is just above 0.5, but you should keep size_usd modest when confidence is only slightly above coin-flip.
   - In the final minutes window (≤ 5 minutes remaining), you MUST only choose UP or DOWN when edge_prob ≥ 0.6. If your best honest estimate of edge_prob is between 0.5 and 0.59, you MUST set direction to NO_BET (and size_usd can be 0).
-  - In the last 4 minutes window (≤ 4 minutes remaining), you MUST always choose direction = "NO_BET", size_usd = 0, and edge_prob = 0.5, regardless of how strong the setup appears.
+  - In the last 2 minutes window (≤ 2 minutes remaining), you MUST always choose direction = "NO_BET", size_usd = 0, and edge_prob = 0.5, regardless of how strong the setup appears.
   - Example: market says Down = 3.5%. You estimate Down = 10%. You pick DOWN. Your edge_prob should be how confident you are that DOWN is correct → perhaps 0.55 (slightly confident), NOT 0.10. If this situation occurs in the final minutes window, you should still strongly consider NO_BET.
   - If direction is NO_BET, set edge_prob to 0.5 and clearly explain in your reasoning why you chose to avoid a bet (e.g., time nearly expired, extreme pricing, conflicting signals, or insufficient edge).
 

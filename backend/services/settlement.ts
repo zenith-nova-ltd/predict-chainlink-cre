@@ -19,7 +19,21 @@ async function settlePendingBets() {
 
   for (const [slug, bets] of slugGroups) {
     try {
-      const markets = await fetchBtcUpDownMarkets({ slug });
+      let markets: Awaited<ReturnType<typeof fetchBtcUpDownMarkets>> = [];
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          markets = await fetchBtcUpDownMarkets({ slug });
+          break;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (attempt < 3 && /timeout|ECONNRESET|ETIMEDOUT/i.test(msg)) {
+            console.warn(`[settlement] slug ${slug} attempt ${attempt}/3 failed: ${msg}, retrying...`);
+            await new Promise((r) => setTimeout(r, 2000 * attempt));
+            continue;
+          }
+          throw err;
+        }
+      }
       if (markets.length === 0) continue;
 
       const market = markets[0]!;

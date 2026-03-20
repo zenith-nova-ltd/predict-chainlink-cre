@@ -7,6 +7,7 @@ const STATUS_BADGE = {
   PENDING: 'bg-yellow-500/15 text-yellow-400',
   WIN: 'bg-emerald-500/15 text-emerald-400',
   LOST: 'bg-red-500/15 text-red-400',
+  CANCELLED: 'bg-gray-500/15 text-gray-400',
 } as const;
 
 const PAGE_SIZE = 10;
@@ -92,6 +93,15 @@ export default function Portfolio() {
                     {summary.pendingBets}
                   </span>
                 </span>
+                {summary.cancelledBets > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-gray-500/10 px-2.5 py-0.5 text-[11px] font-medium text-gray-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-gray-400" />
+                    CANCELLED
+                    <span className="font-mono text-xs text-gray-300">
+                      {summary.cancelledBets}
+                    </span>
+                  </span>
+                )}
               </div>
             }
             color="text-gray-300"

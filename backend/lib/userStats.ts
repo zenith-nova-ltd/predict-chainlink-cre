@@ -6,6 +6,7 @@ interface BetLike {
 export interface BetStats {
   totalBets: number;
   pendingBets: number;
+  cancelledBets: number;
   settledCount: number;
   wonBets: number;
   lostBets: number;
@@ -16,6 +17,7 @@ export interface BetStats {
 export function computeBetStats(bets: BetLike[]): BetStats {
   const totalBets = bets.length;
   const pendingBets = bets.filter((b) => b.status === 'PENDING').length;
+  const cancelledBets = bets.filter((b) => b.status === 'CANCELLED').length;
   const settled = bets.filter((b) => b.status === 'WON' || b.status === 'LOST');
   const wonBets = settled.filter((b) => b.status === 'WON').length;
   const lostBets = settled.length - wonBets;
@@ -25,6 +27,7 @@ export function computeBetStats(bets: BetLike[]): BetStats {
   return {
     totalBets,
     pendingBets,
+    cancelledBets,
     settledCount: settled.length,
     wonBets,
     lostBets,

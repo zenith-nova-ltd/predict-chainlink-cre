@@ -10,7 +10,7 @@ import PredictionHistory from './components/PredictionHistory';
 import AutoStatus from './components/AutoStatus';
 import Portfolio from './components/Portfolio';
 
-const AUTO_INTERVAL_MS = 60_000;
+const AUTO_INTERVAL_MS = 30_000;
 
 type BetMode = 'VIRTUAL' | 'REAL';
 

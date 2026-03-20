@@ -109,4 +109,51 @@ export class TaapiClientService {
     );
     return response.data;
   }
+
+  /**
+   * Fetch multiple indicators in a single HTTP request via TAAPI Bulk endpoint.
+   * Max 20 indicators per call. Each indicator can optionally request up to 20 results (series).
+   */
+  async fetchBulk(
+    symbol: string,
+    interval: string,
+    indicators: Array<{ id: string; indicator: string; [key: string]: unknown }>
+  ): Promise<Array<{ id: string; result: Record<string, unknown>; errors: unknown[] }>> {
+    const bulkUrl = `${this.baseUrl}bulk`;
+    const response = await retry(
+      () =>
+        axios.post(
+          bulkUrl,
+          {
+            secret: this.apiKey,
+            construct: {
+              exchange: 'binance',
+              symbol,
+              interval,
+              indicators,
+            },
+          },
+          {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 15000,
+          }
+        ),
+      {
+        maxAttempts: 3,
+        backoffBase: 750,
+        retryOn: (err: any) => {
+          const code = err?.code;
+          const status = err?.response?.status;
+          return (
+            code === 'ECONNRESET' ||
+            code === 'ETIMEDOUT' ||
+            code === 'EAI_AGAIN' ||
+            code === 'ENOTFOUND' ||
+            (typeof status === 'number' && (status === 429 || status >= 500))
+          );
+        },
+      }
+    );
+    return response.data?.data ?? [];
+  }
 }

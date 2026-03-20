@@ -1,11 +1,11 @@
 import cron from 'node-cron';
 import { Wallet } from 'ethers';
 import prisma from '../lib/db.js';
-import { placePolymarketBet, getUserTradesForToken } from '../polymarket/placeBet.js';
+import { placePolymarketBet, getUserTradesForToken, getOpenSellOrders, getPolymarketOrder } from '../polymarket/placeBet.js';
 import { getUserPositions, fetchTokenPrice, type UserPosition } from '../polymarket/polymarketAPI.js';
 
 const POLY_MIN_SHARES = parseFloat(process.env.POLY_MIN_SHARES || '5');
-const TAKE_PROFIT_PCT = 0.2;  // take-profit at entry × 1.2
+const TAKE_PROFIT_PCT = 0.15;  // take-profit at entry × 1.2
 const STOP_LOSS_PCT   = 0.2;  // stop-loss at entry × 0.7
 
 // In-memory queue keyed by tokenId — prevents processing same position twice
@@ -56,20 +56,55 @@ async function processPosition(position: UserPosition): Promise<void> {
 
   if (position.redeemable) return; // market resolved, nothing to sell
 
+  try {
+    const openSells = await getOpenSellOrders(position.asset);
+    if (openSells.length > 0) {
+      console.log(`${tag} ${openSells.length} open SELL order(s) on CLOB, skip`);
+      return;
+    }
+  } catch (err) {
+    console.warn(`${tag} failed to check open SELL orders, proceeding cautiously:`, err instanceof Error ? err.message : err);
+  }
+
   const size = position.size;
   if (!size || size <= 0) return;
 
-  // ── Entry price: directly from on-chain BUY fills ─────────────────────────
-  let entryPrice: number | null;
-  try {
-    entryPrice = await getOnChainEntryPrice(position.asset);
-  } catch (err) {
-    console.warn(`${tag} failed to fetch on-chain trades, skip:`, err instanceof Error ? err.message : err);
-    return;
+  // ── DB record (single query for both entry price and settlement tracking) ──
+  const dbBet = await prisma.virtualBet.findFirst({
+    where: { clobTokenId: position.asset, isReal: true, status: 'PENDING' } as any,
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, outcomePrice: true, takeProfitPct: true, amount: true },
+  });
+
+  if (!dbBet) {
+    const alreadySettled = await prisma.virtualBet.findFirst({
+      where: { clobTokenId: position.asset, isReal: true, status: { in: ['WON', 'LOST'] } } as any,
+      orderBy: { settledAt: 'desc' },
+      select: { id: true, status: true, settledAt: true },
+    });
+    if (alreadySettled) {
+      console.log(`${tag} already settled (${alreadySettled.status} at ${alreadySettled.settledAt?.toISOString()}), skip`);
+      return;
+    }
+  }
+
+  // ── Entry price ─────────────────────────────────────────────────────────
+  // Priority: DB outcomePrice of the latest PENDING bet > Data API avgPrice.
+  // Data API avgPrice is an aggregate across ALL historical fills for this token,
+  // including fills from already-closed bets. This causes false stop-loss triggers
+  // when a new bet is placed at a price far from the historical average.
+  let entryPrice: number | null = null;
+
+  if (dbBet?.outcomePrice && dbBet.outcomePrice > 0) {
+    entryPrice = dbBet.outcomePrice;
+    console.log(`${tag} using DB outcomePrice=${entryPrice.toFixed(4)}`);
+  } else if (position.avgPrice && position.avgPrice > 0) {
+    entryPrice = position.avgPrice;
+    console.log(`${tag} fallback to Data API avgPrice=${entryPrice.toFixed(4)} (no PENDING DB record)`);
   }
 
   if (!entryPrice) {
-    console.warn(`${tag} no on-chain BUY fills found for asset, skip`);
+    console.warn(`${tag} no entry price found (API=0, DB=null), skip`);
     return;
   }
 
@@ -85,13 +120,6 @@ async function processPosition(position: UserPosition): Promise<void> {
     return;
   }
 
-  // ── Take-profit check ─────────────────────────────────────────────────────
-  // Use takeProfitPct from DB if we have a record, else default 20%
-  const dbBet = await prisma.virtualBet.findFirst({
-    where: { clobTokenId: position.asset, status: 'PENDING', isReal: true } as any,
-    orderBy: { createdAt: 'desc' },
-    select: { id: true, takeProfitPct: true, amount: true },
-  });
   const target    = entryPrice * (1 + TAKE_PROFIT_PCT);
   const stopLoss  = entryPrice * (1 - STOP_LOSS_PCT);
 
@@ -110,11 +138,11 @@ async function processPosition(position: UserPosition): Promise<void> {
 
 
   // ── Minimum sell size validation ──────────────────────────────────────────
-  const notional = livePrice * size;
-  if (notional < 1 || size < POLY_MIN_SHARES) {
-    console.warn(`${tag} SELL too small (notional=$${notional.toFixed(2)}, size=${size.toFixed(2)}), skip`);
-    return;
-  }
+  // const notional = livePrice * size;
+  // if (size < POLY_MIN_SHARES) {
+  //   console.warn(`${tag} SELL too small (notional=$${notional.toFixed(2)}, size=${size.toFixed(2)}), skip`);
+  //   return;
+  // }
 
   // ── Place SELL on-chain ───────────────────────────────────────────────────
   const result = await placePolymarketBet({
@@ -190,6 +218,51 @@ async function checkAndAutoSell(): Promise<void> {
   }
 }
 
+function normalizeOrderStatus(raw: unknown): string {
+  if (!raw) return '';
+  if (typeof raw === 'string') return raw.toLowerCase();
+  return String(raw).toLowerCase();
+}
+
+const CANCEL_BATCH_SIZE = 5;
+
+async function checkCancelledOrders(): Promise<void> {
+  const pendingRealBets = await prisma.virtualBet.findMany({
+    where: { isReal: true, status: 'PENDING', clobOrderId: { not: null } } as any,
+    take: CANCEL_BATCH_SIZE,
+    orderBy: { createdAt: 'asc' as const },
+    select: { id: true, clobOrderId: true } as any,
+  });
+
+  if (pendingRealBets.length === 0) return;
+
+  for (const bet of pendingRealBets) {
+    const orderId = (bet as any).clobOrderId as string;
+    if (!orderId) continue;
+
+    try {
+      const order = await getPolymarketOrder(orderId);
+      const status = normalizeOrderStatus((order as any)?.status);
+
+      if (status === 'canceled') {
+        const { count } = await prisma.virtualBet.updateMany({
+          where: { id: bet.id, status: 'PENDING' },
+          data: { status: 'CANCELLED', settledAt: new Date() } as any,
+        });
+
+        if (count > 0) {
+          console.log(`[realBetMonitor][cancel] bet ${bet.id} marked CANCELLED (CLOB order ${orderId})`);
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[realBetMonitor][cancel] failed to check order ${orderId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+}
+
 export function startRealBetMonitorCron(): void {
   const intervalSec = parseInt(process.env.REAL_BET_MONITOR_INTERVAL_SEC || '30', 10);
   const cronExpr = `*/${intervalSec} * * * * *`;
@@ -197,7 +270,10 @@ export function startRealBetMonitorCron(): void {
 
   cron.schedule(cronExpr, async () => {
     try {
-      await checkAndAutoSell();
+      await Promise.all([
+        checkAndAutoSell(),
+        checkCancelledOrders(),
+      ]);
     } catch (err) {
       console.error('[realBetMonitor] top-level error:', err instanceof Error ? err.message : err);
     }

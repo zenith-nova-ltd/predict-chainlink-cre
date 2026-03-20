@@ -20,7 +20,7 @@ function getIndicatorsByIds(ids: string[]): IndicatorDefinition[] {
 }
 
 import { buildPolymarketUpDownPrompt, buildTools } from './prompts.js';
-import { delay, roundOrNull, roundSeries } from '../lib/utils/utils.js';
+import { roundOrNull, roundSeries } from '../lib/utils/utils.js';
 import https from 'https';
 import { retry } from '../lib/utils/utils.js';
 
@@ -179,6 +179,8 @@ export class PolymarketUpDownAgent {
     market: UpDownMarketSnapshot,
     context: string
   ): Promise<UpDownAgentOutput> {
+    const decideStart = performance.now();
+
     const systemPrompt = buildPolymarketUpDownPrompt(
       market.market_slug,
       assetSymbol,
@@ -207,7 +209,12 @@ export class PolymarketUpDownAgent {
 
       let respJson: OpenRouterResponse;
       try {
-        respJson = await this.callLLM(payload);
+        if (process.env.GEMINI_API_KEY) {
+          console.log('[prediction] Using Gemini API');
+          respJson = await this.callLLMByGemini(payload);
+        } else {
+          respJson = await this.callLLM(payload);
+        }
       } catch (error) {
         const axiosError = error as AxiosError<OpenRouterResponse>;
         if (axiosError.response?.data) {
@@ -224,13 +231,18 @@ export class PolymarketUpDownAgent {
       }
 
       const message = choice.message;
-      // Final response
+      console.log(message);
       if (typeof message.content !== 'string') {
         throw new Error('Invalid LLM response: content is not a string.');
       }
 
       messages.push(message);
-      return this.parseUpDownResponse(message, market.market_slug);
+      const result = this.parseUpDownResponse(message, market.market_slug);
+
+      const decideElapsed = Math.round(performance.now() - decideStart);
+      console.log(`[prediction] decideUpDown total time: ${decideElapsed}ms`);
+
+      return result;
   }
 
   private async callLLM(payload: Record<string, unknown>) {
@@ -241,6 +253,7 @@ export class PolymarketUpDownAgent {
     };
 
     const httpsAgent = new https.Agent({ family: 4 });
+    const startTime = performance.now();
     const response = await retry(
       () =>
         axios.post(this.baseUrl, payload, {
@@ -264,6 +277,8 @@ export class PolymarketUpDownAgent {
         },
       }
     );
+    const elapsedMs = Math.round(performance.now() - startTime);
+    console.log(`[prediction] OpenRouter LLM response time: ${elapsedMs}ms`);
 
     if (response.status !== 200) {
       const errorText =
@@ -274,6 +289,114 @@ export class PolymarketUpDownAgent {
     }
 
     return response.data as OpenRouterResponse;
+  }
+
+  /**
+   * Strip fields unsupported by Gemini's responseSchema (e.g. additionalProperties, $schema).
+   * Recursively cleans nested objects and array items.
+   */
+  private toGeminiSchema(schema: Record<string, unknown>): Record<string, unknown> {
+    const { additionalProperties: _ap, $schema: _s, ...rest } = schema;
+
+    if (rest.properties && typeof rest.properties === 'object') {
+      rest.properties = Object.fromEntries(
+        Object.entries(rest.properties as Record<string, unknown>).map(([k, v]) => [
+          k,
+          this.toGeminiSchema(v as Record<string, unknown>),
+        ]),
+      );
+    }
+
+    if (rest.items && typeof rest.items === 'object') {
+      rest.items = this.toGeminiSchema(rest.items as Record<string, unknown>);
+    }
+
+    return rest;
+  }
+
+  /**
+   * Call Google Gemini API directly and return an OpenRouterResponse-compatible object.
+   * Accepts the same OpenRouter-style payload as callLLM and converts internally.
+   *
+   * Env vars required: GEMINI_API_KEY, GEMINI_MODEL (default: gemini-2.0-flash)
+   */
+  private async callLLMByGemini(payload: Record<string, unknown>): Promise<OpenRouterResponse> {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error('Missing GEMINI_API_KEY env var');
+
+    const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    // Convert OpenRouter messages → Gemini format
+    const messages = (payload.messages as ChatMessage[]) ?? [];
+    const systemMsg = messages.find((m) => m.role === 'system');
+    const contents = messages
+      .filter((m) => m.role !== 'system')
+      .map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content ?? '' }] }));
+
+    // Extract JSON schema from response_format (OpenRouter convention)
+    const responseFormat = payload.response_format as Record<string, unknown> | undefined;
+    const jsonSchema = (responseFormat?.json_schema as Record<string, unknown> | undefined)?.schema as
+      | Record<string, unknown>
+      | undefined;
+
+    const geminiPayload = {
+      ...(systemMsg ? { system_instruction: { parts: [{ text: systemMsg.content ?? '' }] } } : {}),
+      contents,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        ...(jsonSchema ? { responseSchema: this.toGeminiSchema(jsonSchema) } : {}),
+        temperature: 0.2,
+      },
+    };
+
+    const httpsAgent = new https.Agent({ family: 4 });
+    const startTime = performance.now();
+    const response = await retry(
+      () =>
+        axios.post(url, geminiPayload, {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 60000,
+          httpsAgent,
+        }),
+      {
+        maxAttempts: 3,
+        backoffBase: 750,
+        retryOn: (err) => {
+          const code = err?.code;
+          const status = err?.response?.status;
+          return (
+            code === 'ECONNRESET' ||
+            code === 'ETIMEDOUT' ||
+            code === 'EAI_AGAIN' ||
+            code === 'ENOTFOUND' ||
+            (typeof status === 'number' && (status === 429 || status >= 500))
+          );
+        },
+      },
+    );
+    const elapsedMs = Math.round(performance.now() - startTime);
+    console.log(`[prediction] Gemini LLM response time: ${elapsedMs}ms`);
+
+    if (response.status !== 200) {
+      const errorText =
+        typeof response.data === 'object' ? JSON.stringify(response.data) : response.data;
+      throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+    }
+
+    // Gemini response shape: { candidates: [{ content: { parts: [{ text }] } }] }
+    const candidate = response.data?.candidates?.[0];
+    const text: string = candidate?.content?.parts?.[0]?.text ?? '{}';
+
+    // Normalise to OpenRouterResponse so the rest of the pipeline stays unchanged
+    return {
+      choices: [
+        {
+          message: { role: 'assistant', content: text },
+          finish_reason: candidate?.finishReason ?? 'stop',
+        },
+      ],
+    };
   }
 
   /**
@@ -400,13 +523,23 @@ private async fetchAssetMarketData(
   longTermDefs: IndicatorDefinition[]
 ): Promise<MarketSection> {
 
-  const symbol = `${asset}/USDT`;
+  const priceDef: IndicatorDefinition = {
+    id: '_price',
+    nameKey: '',
+    taapiIndicator: 'price',
+    params: {},
+    valueKey: 'value',
+    fetchSeries: false,
+  };
+  const intradayDefsWithPrice = [...intradayDefs, priceDef];
 
-  const [intradayData, longTermData, currentPrice] = await Promise.all([
-    this.fetchIndicatorsByDefs(asset, intradayTimeframe, seriesResults, intradayDefs),
+  const [intradayData, longTermData] = await Promise.all([
+    this.fetchIndicatorsByDefs(asset, intradayTimeframe, seriesResults, intradayDefsWithPrice),
     this.fetchIndicatorsByDefs(asset, longTermTimeframe, seriesResults, longTermDefs),
-    this.taapi.fetchValue('price', symbol, intradayTimeframe, {}, 'value'),
   ]);
+
+  const currentPrice = intradayData.values['_price'] ?? null;
+  delete intradayData.values['_price'];
 
   return {
     asset,
@@ -417,7 +550,7 @@ private async fetchAssetMarketData(
   };
 }
 /**
-   * Fetch indicators by definitions; sequential calls to reduce TAAPI rate limit.
+   * Fetch indicators via TAAPI Bulk endpoint — single HTTP request for all defs.
    */
 private async fetchIndicatorsByDefs(
   asset: string,
@@ -429,18 +562,29 @@ private async fetchIndicatorsByDefs(
   const series: Record<string, number[]> = {};
   const symbol = `${asset}/USDT`;
 
+  const bulkIndicators = defs.map((def) => {
+    const needsSeries = def.fetchSeries || (def.multiValueKeys?.length ?? 0) > 0;
+    return {
+      id: def.id,
+      indicator: def.taapiIndicator,
+      ...def.params,
+      ...(needsSeries ? { results: Math.min(seriesResults, 20) } : {}),
+    };
+  });
+
+  const startTime = performance.now();
+  const bulkResults = await this.taapi.fetchBulk(symbol, timeframe, bulkIndicators);
+  console.log(
+    `[prediction] TAAPI bulk (${timeframe}, ${defs.length} indicators): ${Math.round(performance.now() - startTime)}ms`
+  );
+
   for (const def of defs) {
-    await delay(1000);
+    const entry = bulkResults.find((r) => r.id === def.id);
+    if (!entry?.result) continue;
+
     if (def.multiValueKeys?.length) {
-      const data = await this.taapi.getHistoricalData(
-        def.taapiIndicator,
-        symbol,
-        timeframe,
-        seriesResults,
-        def.params as Record<string, unknown>
-      );
       for (const { responseKey, outputId } of def.multiValueKeys) {
-        const raw = data[responseKey];
+        const raw = entry.result[responseKey];
         const arr = Array.isArray(raw)
           ? raw.map((v: unknown) => (typeof v === 'number' ? v : 0))
           : typeof raw === 'number'
@@ -450,25 +594,17 @@ private async fetchIndicatorsByDefs(
         values[outputId] = roundOrNull(arr[arr.length - 1] ?? null, 2);
       }
     } else if (def.fetchSeries && def.valueKey) {
-      const arr = await this.taapi.fetchSeries(
-        def.taapiIndicator,
-        symbol,
-        timeframe,
-        seriesResults,
-        def.params as Record<string, unknown>,
-        def.valueKey
-      );
+      const raw = entry.result[def.valueKey];
+      const arr = Array.isArray(raw)
+        ? raw.map((v: unknown) => (typeof v === 'number' ? v : 0))
+        : typeof raw === 'number'
+          ? [raw]
+          : [];
       series[def.id] = roundSeries(arr, 2);
       values[def.id] = roundOrNull(arr[arr.length - 1] ?? null, 2);
     } else if (def.valueKey) {
-      const val = await this.taapi.fetchValue(
-        def.taapiIndicator,
-        symbol,
-        timeframe,
-        def.params as Record<string, unknown>,
-        def.valueKey
-      );
-      values[def.id] = roundOrNull(val, 2);
+      const val = entry.result[def.valueKey];
+      values[def.id] = roundOrNull(typeof val === 'number' ? val : null, 2);
     }
   }
 
@@ -484,18 +620,23 @@ private async fetchIndicatorsByDefs(
     marketData: MarketSection[];
     result: UpDownAgentOutput;
   }> {
+    const predictStart = performance.now();
     const asset = symbol.toUpperCase();
 
     const FIFTEEN_MINUTES = 15 * 60;
     const nowMs = Date.now();
     const currentTimeIso = new Date(nowMs).toISOString();
 
-    // Build slug for the current 15m window as before
     const nowSec = Math.floor(nowMs / 1000);
     const roundedTimestamp = Math.floor(nowSec / FIFTEEN_MINUTES) * FIFTEEN_MINUTES;
     const slug = `${asset.toLowerCase()}-updown-15m-${roundedTimestamp}`;
 
-    const markets = await fetchBtcUpDownMarkets({ slug });
+    const parallelStart = performance.now();
+    const [markets, marketData] = await Promise.all([
+      fetchBtcUpDownMarkets({ slug }),
+      this.getCurrentMarketData({ asset }),
+    ]);
+    console.log(`[prediction] parallel fetch (market + indicators): ${Math.round(performance.now() - parallelStart)}ms`);
 
     if (!markets || markets.length === 0 || !markets[0]) {
       throw new Error(`No Polymarket market found for slug: ${slug}`);
@@ -522,8 +663,6 @@ private async fetchIndicatorsByDefs(
       clobTokenIds: m.clobTokenIds ?? [],
     };
 
-    const marketData = await this.getCurrentMarketData({ asset });
-
     const context = this.buildUserContext({
       marketData,
       assets: [asset],
@@ -534,6 +673,9 @@ private async fetchIndicatorsByDefs(
     });
 
     const result = await this.decideUpDown(asset, snapshot, context);
+
+    const predictElapsed = Math.round(performance.now() - predictStart);
+    console.log(`[prediction] predict() total time: ${predictElapsed}ms`);
 
     return { market: snapshot, marketData, result };
   }

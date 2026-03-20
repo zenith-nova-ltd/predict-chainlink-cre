@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { ethers } from 'ethers';
 import { PolymarketUpDownAgent } from './polymarket/prediction.js';
 import { getPolymarketOrder, placePolymarketBet } from './polymarket/placeBet.js';
+import { getUserPositions } from './polymarket/polymarketAPI.js';
 import prisma from './lib/db.js';
 import { authMiddleware, signToken } from './auth/middleware.js';
 import { startSettlementCron } from './services/settlement.ts';
@@ -144,12 +145,9 @@ app.post('/api/auth/verify', async (req, res) => {
   }
 });
 
-function getDisplayStatusForBet(bet: { status: string; pnl: number | null }): 'WIN' | 'LOST' | 'PENDING' {
-  // Pending bets are always PENDING
+function getDisplayStatusForBet(bet: { status: string; pnl: number | null }): 'WIN' | 'LOST' | 'PENDING' | 'CANCELLED' {
   if (bet.status === 'PENDING') return 'PENDING';
-
-  // Cancelled bets are excluded from WIN/LOST and treated as neither
-  if (bet.status === 'CANCELLED') return 'PENDING';
+  if (bet.status === 'CANCELLED') return 'CANCELLED';
 
   const pnl = bet.pnl ?? 0;
   if (pnl > 0) return 'WIN';
@@ -463,9 +461,13 @@ app.get('/api/virtual-bets/summary', authMiddleware, async (req, res) => {
     const pendingBets = bets.filter((b) => getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null }) === 'PENDING')
       .length;
 
-    const settledDisplayBets = bets.filter(
-      (b) => getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null }) !== 'PENDING',
-    );
+    const cancelledBets = bets.filter((b) => getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null }) === 'CANCELLED')
+      .length;
+
+    const settledDisplayBets = bets.filter((b) => {
+      const ds = getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null });
+      return ds !== 'PENDING' && ds !== 'CANCELLED';
+    });
 
     const wonBets = settledDisplayBets.filter(
       (b) => getDisplayStatusForBet({ status: b.status, pnl: b.pnl ?? null }) === 'WIN',
@@ -480,6 +482,7 @@ app.get('/api/virtual-bets/summary', authMiddleware, async (req, res) => {
       balance: user.balance,
       totalBets,
       pendingBets,
+      cancelledBets,
       settledBets: settledDisplayBets.length,
       wonBets,
       lostBets,
@@ -904,6 +907,40 @@ app.post('/api/place-bet', async (req, res) => {
     }
 
     const resolvedSide: 'BUY' | 'SELL' = side ?? 'BUY';
+
+    // Block BUY if there is ANY open on-chain position (any tokenId).
+    // Each 15-min market window has different tokenIds, so checking only
+    // the requested tokenId would miss positions from earlier windows and
+    // cause duplicate buys while USDC is locked up.
+    if (resolvedSide === 'BUY') {
+      try {
+        const proxyWallet = process.env.PROXY_WALLET?.trim();
+        const walletAddress = proxyWallet
+          ? proxyWallet.toLowerCase()
+          : new ethers.Wallet(process.env.PRIVATE_KEY!).address.toLowerCase();
+
+        const positions = await getUserPositions(walletAddress);
+        const activePositions = positions.filter(
+          (p) => p.size > 0 && !p.redeemable,
+        );
+        if (activePositions.length > 0) {
+          const first = activePositions[0]!;
+          console.log(
+            `[place-bet] BUY blocked — ${activePositions.length} active on-chain position(s) exist. ` +
+            `First: ${first.asset.slice(0, 12)}... size=${first.size} "${first.title?.slice(0, 40) ?? ''}"`,
+          );
+          res.status(409).json({
+            error: `${activePositions.length} active position(s) on-chain. Close them before buying again.`,
+            activeCount: activePositions.length,
+            firstToken: first.asset,
+            firstSize: first.size,
+          });
+          return;
+        }
+      } catch (err) {
+        console.warn('[place-bet] Could not check existing positions, proceeding with BUY:', err instanceof Error ? err.message : err);
+      }
+    }
 
     // Interpret incoming BUY "size" as USD notional (Auto uses this endpoint)
     let finalSize = size;

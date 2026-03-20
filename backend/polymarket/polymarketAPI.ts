@@ -40,7 +40,6 @@ function createAxiosAgent(): https.Agent {
   return new https.Agent({ family: 4 });
 }
 
-const httpsAgent = createAxiosAgent();
 
 function isRetryableNetworkError(err: any): boolean {
   const code = err?.code;
@@ -129,7 +128,6 @@ export async function fetchBtcUpDownMarkets(options?: {
     const res = await retry(
       () =>
         axios.get(`${GAMMA_API}/events/slug/${encodeURIComponent(slug)}`, {
-          httpsAgent,
           timeout: 15000,
         }),
       { maxAttempts: 3, backoffBase: 500, retryOn: isRetryableNetworkError }
@@ -140,7 +138,6 @@ export async function fetchBtcUpDownMarkets(options?: {
     const res = await retry(
       () =>
         axios.get(`${GAMMA_API}/events`, {
-          httpsAgent,
           timeout: 15000,
           params: {
             active: true,
@@ -153,29 +150,40 @@ export async function fetchBtcUpDownMarkets(options?: {
     events = res.data as PolymarketEvent[];
   }
 
-  const results: BtcMarketData[] = [];
 
-  for (const event of events) {
-    const title = (event.title || '').toLowerCase();
-    if (!slug && !title.includes('btc') && !title.includes('bitcoin')) continue;
-    if (!slug && options?.searchTitle && !title.includes(searchTitle.toLowerCase())) continue;
+  const event = events[0];
+  if (!event) return [];
 
-    for (const market of event.markets || []) {
-      const outcomes = parseOutcomes(market.outcomes, market.outcomePrices);
-      if (outcomes.length === 0) continue;
-      results.push({
-        id: market.id ?? event.id,
-        question: market.question ?? event.title ?? '',
-        slug: event.slug ?? slug ?? '',
-        outcomes,
-        clobTokenIds: market.clobTokenIds ?? [],
-        closed: !!event.closed,
-        eventStartTime: market.eventStartTime,
-      });
-    }
+  const title = (event.title || '').toLowerCase();
+  if (!slug && !title.includes('btc') && !title.includes('bitcoin')) return [];
+  if (!slug && options?.searchTitle && !title.includes(searchTitle.toLowerCase())) return [];
+
+  const market = (event.markets || [])[0];
+  if (!market?.clobTokenIds) return [];
+
+  const raw = market.clobTokenIds;
+  const tokenIds: string[] = Array.isArray(raw) ? raw : (() => { try { return JSON.parse(raw as string) as string[]; } catch { return []; } })();
+  let clobPrices: (number | null)[] = [];
+  if (tokenIds.length > 0) {
+    const clobStart = performance.now();
+    const firstPrice = await fetchTokenPrice(tokenIds[0]!, 'buy').catch(() => null);
+    console.log(`[fetchBtcUpDownMarkets] CLOB price: ${Math.round(performance.now() - clobStart)}ms`);
+    clobPrices = firstPrice !== null
+      ? [firstPrice, ...tokenIds.slice(1).map(() => Math.round((1 - firstPrice) * 100) / 100)]
+      : tokenIds.map(() => null);
   }
+  const outcomes = parseOutcomes(market.outcomes, JSON.stringify(clobPrices.map(p => String(p ?? 0))));
+  if (outcomes.length === 0) return [];
 
-  return results;
+  return [{
+    id: market.id ?? event.id,
+    question: market.question ?? event.title ?? '',
+    slug: event.slug ?? slug ?? '',
+    outcomes,
+    clobTokenIds: market.clobTokenIds ?? [],
+    closed: !!event.closed,
+    eventStartTime: market.eventStartTime,
+  }];
 }
 
 /**
@@ -185,7 +193,6 @@ export async function fetchTokenPrice(tokenId: string, side: 'buy' | 'sell' = 'b
   const res = await retry(
     () =>
       axios.get(`${CLOB_API}/price`, {
-        httpsAgent,
         timeout: 15000,
         params: { token_id: tokenId, side },
       }),
@@ -222,7 +229,6 @@ export async function getUserPositions(walletAddress: string): Promise<UserPosit
   const res = await retry(
     () =>
       axios.get(`${DATA_API}/positions`, {
-        httpsAgent,
         timeout: 15000,
         params: { user: walletAddress.toLowerCase() },
       }),
@@ -240,7 +246,6 @@ export async function fetchOrderBook(
   const res = await retry(
     () =>
       axios.get(`${CLOB_API}/book`, {
-        httpsAgent,
         timeout: 15000,
         params: { token_id: tokenId },
       }),

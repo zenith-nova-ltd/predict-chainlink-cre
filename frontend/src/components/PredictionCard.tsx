@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getVirtualBets, placeVirtualBet, sellVirtualBet, sellRealBetFromShadow } from '../api/prediction';
+import { useState, useEffect, useMemo } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { placeVirtualBet } from '../api/prediction';
 import { useAuth } from '../context/AuthContext';
 import type { PredictionResponse } from '../types';
 
@@ -353,93 +353,7 @@ export default function PredictionCard({
     });
   };
 
-  const { data: virtualBets } = useQuery({
-    queryKey: ['virtual-bets'],
-    queryFn: () => getVirtualBets(),
-    enabled: !!user,
-    refetchInterval: 15_000,
-  });
 
-  const autoSellTriggeredRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!user || !predictionId || !virtualBets || !clobTokenIds.length) return;
-    const upLive = upIndex >= 0 ? (liveOutcomePrices[upIndex] ?? data.market.outcomePrices[upIndex] ?? NaN) : NaN;
-    const downLive = downIndex >= 0 ? (liveOutcomePrices[downIndex] ?? data.market.outcomePrices[downIndex] ?? NaN) : NaN;
-
-    const relevantBets = virtualBets.filter((b) => b.status === 'PENDING' && b.marketSlug === marketKey);
-
-    for (const bet of relevantBets) {
-      if (autoSellTriggeredRef.current.has(bet.id)) continue;
-
-      const livePrice = bet.direction === 'UP' ? upLive : downLive;
-      if (!Number.isFinite(livePrice) || livePrice <= 0 || livePrice > 1.0001) continue;
-
-      const entryPrice = bet.outcomePrice;
-      if (!entryPrice || entryPrice <= 0) continue;
-
-      const targetPrice = entryPrice * 1.1;
-      console.log("targetPrice", { entryPrice, targetPrice });
-
-      if (livePrice >= targetPrice) {
-        console.log('[auto-sell] target reached', {
-          betId: bet.id,
-          direction: bet.direction,
-          entryPrice,
-          livePrice,
-          targetPrice,
-          mode: betMode,
-          marketSlug: marketKey,
-        });
-
-        autoSellTriggeredRef.current.add(bet.id);
-
-        if (betMode === 'VIRTUAL') {
-          sellVirtualBet(bet.id, livePrice)
-            .then(() => {
-              refreshProfile();
-              queryClient.invalidateQueries({ queryKey: ['virtual-bets'] });
-              queryClient.invalidateQueries({ queryKey: ['bet-summary'] });
-            })
-            .catch((err: Error) => {
-              autoSellTriggeredRef.current.delete(bet.id);
-              console.error('[auto-sell] failed (virtual)', {
-                betId: bet.id,
-                error: err.message,
-              });
-            });
-        } else {
-          sellRealBetFromShadow(bet.id, livePrice)
-            .then(() => {
-              console.log('[auto-sell] real SELL placed', {
-                betId: bet.id,
-                livePrice,
-              });
-            })
-            .catch((err: Error) => {
-              autoSellTriggeredRef.current.delete(bet.id);
-              console.error('[auto-sell] failed (real)', {
-                betId: bet.id,
-                error: err.message,
-              });
-            });
-        }
-      }
-    }
-  }, [
-    user,
-    predictionId,
-    virtualBets,
-    clobTokenIds.length,
-    liveOutcomePrices,
-    upIndex,
-    downIndex,
-    marketKey,
-    refreshProfile,
-    queryClient,
-    data.market.outcomePrices,
-    betMode,
-  ]);
 
   const canBet = !!user && !!predictionId && usdAmount > 0 && usdAmount <= balance;
 
