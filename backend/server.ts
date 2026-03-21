@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { ethers } from 'ethers';
 import { PolymarketUpDownAgent } from './polymarket/prediction.js';
 import { getPolymarketOrder, placePolymarketBet } from './polymarket/placeBet.js';
-import { getUserPositions } from './polymarket/polymarketAPI.js';
+import { getUserPositions, fetchTokenPrice } from './polymarket/polymarketAPI.js';
 import prisma from './lib/db.js';
 import { authMiddleware, signToken } from './auth/middleware.js';
 import { startSettlementCron } from './services/settlement.ts';
@@ -944,6 +944,7 @@ app.post('/api/place-bet', async (req, res) => {
 
     // Interpret incoming BUY "size" as USD notional (Auto uses this endpoint)
     let finalSize = size;
+    let orderPrice = price;
     if (resolvedSide === 'BUY') {
       let usdNotional = size;
 
@@ -966,8 +967,40 @@ app.post('/api/place-bet', async (req, res) => {
         usdNotional = maxUsd;
       }
 
+      // Slippage check: re-fetch current CLOB price and compare with prediction-time price
+      const slippagePct = parseFloat(process.env.BUY_SLIPPAGE_PERCENT ?? '5');
+      const slippageRatio = slippagePct / 100;
+
+      try {
+        const currentPrice = await fetchTokenPrice(tokenId, 'buy');
+        const drift = Math.abs(currentPrice - price) / price;
+
+        console.log(
+          `[place-bet] Slippage check: original=${price.toFixed(4)} current=${currentPrice.toFixed(4)} ` +
+          `drift=${(drift * 100).toFixed(2)}% max=${slippagePct}%`,
+        );
+
+        if (drift > slippageRatio) {
+          res.status(409).json({
+            error: 'PRICE_SLIPPAGE_EXCEEDED',
+            originalPrice: price,
+            currentPrice,
+            driftPercent: +(drift * 100).toFixed(2),
+            maxSlippagePercent: slippagePct,
+          });
+          return;
+        }
+
+        orderPrice = currentPrice;
+      } catch (err) {
+        console.warn(
+          '[place-bet] Could not fetch current price for slippage check, using original price:',
+          err instanceof Error ? err.message : err,
+        );
+      }
+
       // Convert USD notional -> shares cho Polymarket CLOB
-      finalSize = usdNotional / price;
+      finalSize = usdNotional / orderPrice;
 
       // Đảm bảo thỏa min shares của Polymarket
       if (Number.isFinite(POLY_MIN_SHARES) && finalSize < POLY_MIN_SHARES) {
@@ -977,7 +1010,7 @@ app.post('/api/place-bet', async (req, res) => {
 
     const result = await placePolymarketBet({
       tokenId,
-      price,
+      price: orderPrice,
       size: finalSize,
       side: resolvedSide,
     });
